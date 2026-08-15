@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import path from "node:path";
 import test from "node:test";
-import { managedDeletionTargets } from "./library.js";
+import { managedDeletionTargets, managedJobDeletionTargets } from "./library.js";
 import type { Clip, PublishJob } from "./types.js";
 
 const roots = {
@@ -36,4 +36,11 @@ test("does not delete external files or accept traversal in stored output names"
     [job("../../outside.mp4")],
     roots,
   ), []);
+});
+
+test("targets one published version without including other clip files", () => {
+  assert.deepEqual(managedJobDeletionTargets(job("published.mp4"), roots.exports), [
+    path.resolve("/managed/exports/published.mp4"),
+  ]);
+  assert.deepEqual(managedJobDeletionTargets(job("../../outside.mp4"), roots.exports), []);
 });

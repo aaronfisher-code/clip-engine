@@ -15,6 +15,7 @@ The browser never receives R2 credentials and the service only listens on `127.0
 - Multipart-upload large exports to R2 with live progress and copy a branded share-page URL.
 - Generate a 1280×720 thumbnail and Open Graph metadata for titled, playable Discord embeds.
 - Serve every published clip on a responsive public page with playback, sharing, and download controls.
+- Keep every re-publish as a visible version with its trim/audio settings and delete individual versions from R2 and local history.
 - Retain the original recording unchanged and persist the local library/job history.
 
 ## Prerequisites
@@ -151,7 +152,7 @@ data/
 └── clip-engine.json
 ```
 
-Clip Engine intentionally keeps local exports after upload. Originals and exports are never automatically deleted.
+Clip Engine intentionally keeps local exports after upload. Originals and exports are never automatically deleted. Deleting one published version explicitly removes its share page, video, and thumbnail from R2 along with that version's local export and history; the source recording and other versions are kept.
 
 ## Commands
 

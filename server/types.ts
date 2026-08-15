@@ -34,6 +34,13 @@ export type PublishJob = {
   progress: number;
   createdAt: string;
   outputName: string;
+  selection?: {
+    start: number;
+    end: number;
+    audioStreamIndexes: number[];
+  };
+  remoteKeys?: string[];
+  publishedAt?: string;
   url?: string;
   mediaUrl?: string;
   thumbnailUrl?: string;

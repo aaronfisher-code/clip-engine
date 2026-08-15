@@ -55,6 +55,11 @@ export class Store {
     await this.save();
   }
 
+  async deleteJob(id: string) {
+    this.data.jobs = this.data.jobs.filter((job) => job.id !== id);
+    await this.save();
+  }
+
   jobs() {
     return [...this.data.jobs].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   }

@@ -31,6 +31,12 @@ export type Job = {
   progress: number;
   createdAt: string;
   outputName: string;
+  selection?: {
+    start: number;
+    end: number;
+    audioStreamIndexes: number[];
+  };
+  publishedAt?: string;
   url?: string;
   mediaUrl?: string;
   thumbnailUrl?: string;

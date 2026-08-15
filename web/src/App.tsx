@@ -75,8 +75,12 @@ export function App() {
   const selected = clips.find((clip) => clip.id === selectedId);
   const selectedJobs = jobs.filter((job) => job.clipId === selectedId);
   const publishedJobs = new Map<string, Job>();
+  const publishedVersionCounts = new Map<string, number>();
   for (const job of jobs) {
-    if (job.status === "complete" && job.url && !publishedJobs.has(job.clipId)) publishedJobs.set(job.clipId, job);
+    if (job.status === "complete" && job.url) {
+      if (!publishedJobs.has(job.clipId)) publishedJobs.set(job.clipId, job);
+      publishedVersionCounts.set(job.clipId, (publishedVersionCounts.get(job.clipId) || 0) + 1);
+    }
   }
   const inboxClips = clips.filter((clip) => !publishedJobs.has(clip.id));
   const publishedClips = clips.filter((clip) => publishedJobs.has(clip.id));
@@ -234,7 +238,9 @@ export function App() {
                   <div className="clip-copy">
                     <strong>{clip.name}</strong>
                     <span>{clip.width}×{clip.height} · {Math.round(clip.fps)} fps</span>
-                    <small>{new Date(clip.createdAt).toLocaleString()}</small>
+                    <small>{libraryArea === "published"
+                      ? `${publishedVersionCounts.get(clip.id)} published version${publishedVersionCounts.get(clip.id) === 1 ? "" : "s"}`
+                      : new Date(clip.createdAt).toLocaleString()}</small>
                   </div>
                 </button>
                 {publishedJobs.get(clip.id)?.url && <button className="quick-link" title="Copy published link" aria-label={`Copy published link for ${clip.name}`} onClick={() => copyPublishedLink(clip.id)}>⧉</button>}
@@ -263,6 +269,17 @@ export function App() {
                 setSelectedId(visibleClips.find((clip) => clip.id !== selected.id)?.id);
                 setNotice("Local clip deleted. Existing R2 uploads were left online.");
               });
+            }} onDeleteVersion={(job) => {
+              const confirmed = window.confirm(`Delete this published version of "${selected.name}"?\n\nThis permanently removes its share page, video, thumbnail, local export, and history. Other versions and the source recording will be kept.`);
+              if (!confirmed) return;
+              void run(async () => {
+                await api.removeJob(job.id);
+                setJobs((current) => current.filter((item) => item.id !== job.id));
+                if (selectedJobs.filter((item) => item.status === "complete" && item.url).length === 1) {
+                  setLibraryArea("inbox");
+                }
+                setNotice("Published version deleted from R2 and local history.");
+              });
             }} onPublish={(start, end, tracks) => run(async () => {
               const job = await api.publish(selected.id, start, end, tracks);
               setJobs((current) => [job, ...current]);
@@ -282,12 +299,13 @@ export function App() {
   );
 }
 
-function Editor({ clip, jobs, config, busy, onDelete, onPublish }: {
+function Editor({ clip, jobs, config, busy, onDelete, onDeleteVersion, onPublish }: {
   clip: Clip;
   jobs: Job[];
   config?: AppConfig;
   busy: boolean;
   onDelete: () => void;
+  onDeleteVersion: (job: Job) => void;
   onPublish: (start: number, end: number, tracks: number[]) => void;
 }) {
   const frameStep = 1 / Math.max(1, clip.fps || 120);
@@ -296,7 +314,7 @@ function Editor({ clip, jobs, config, busy, onDelete, onPublish }: {
   const [tracks, setTracks] = useState<number[]>(clip.audioTracks.map((track) => track.streamIndex));
   const video = useRef<HTMLVideoElement>(null);
   const activeJob = jobs.find((job) => ["queued", "transcoding", "uploading"].includes(job.status));
-  const completedJob = jobs.find((job) => job.status === "complete" && job.url);
+  const completedJobs = jobs.filter((job) => job.status === "complete" && job.url);
 
   function seek(time: number) {
     if (video.current) video.current.currentTime = time;
@@ -397,12 +415,37 @@ function Editor({ clip, jobs, config, busy, onDelete, onPublish }: {
           </section>
 
           {jobs.find((job) => job.status === "failed")?.error && <div className="job-error"><strong>Publish failed</strong>{jobs.find((job) => job.status === "failed")?.error}</div>}
-          {completedJob?.url && (
-            <div className="share-result">
-              <span>✓</span>
-              <div><strong>Your Discord-ready clip is live</strong><a href={completedJob.url} target="_blank" rel="noreferrer">{completedJob.url}</a></div>
-              <button onClick={() => void navigator.clipboard.writeText(completedJob.url!)}>Copy link</button>
-            </div>
+          {completedJobs.length > 0 && (
+            <section className="versions-card">
+              <div className="versions-heading">
+                <div><strong>Published versions</strong><small>Each re-publish is kept separately</small></div>
+                <span>{completedJobs.length} version{completedJobs.length === 1 ? "" : "s"}</span>
+              </div>
+              <div className="version-list">
+                {completedJobs.map((job, index) => {
+                  const selection = job.selection;
+                  const audioNames = selection?.audioStreamIndexes.map((streamIndex) => {
+                    const track = clip.audioTracks.find((item) => item.streamIndex === streamIndex);
+                    return track ? trackName(track, config?.audioTrackLabels) : `Track ${streamIndex}`;
+                  });
+                  return (
+                    <div className="version-row" key={job.id}>
+                      <div className="version-copy">
+                        <div><strong>{index === 0 ? "Latest version" : `Version ${completedJobs.length - index}`}</strong><span>{new Date(job.publishedAt || job.createdAt).toLocaleString()}</span></div>
+                        <small>{selection
+                          ? `${formatDuration(selection.start)}–${formatDuration(selection.end)} · ${audioNames?.length ? audioNames.join(" + ") : "No audio"}`
+                          : "Edit settings unavailable for this older version"}</small>
+                      </div>
+                      <div className="version-actions">
+                        <a href={job.url} target="_blank" rel="noreferrer">Open</a>
+                        <button disabled={busy} onClick={() => void navigator.clipboard.writeText(job.url!)}>Copy</button>
+                        <button className="version-delete" disabled={busy} onClick={() => onDeleteVersion(job)}>Delete</button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </section>
           )}
         </div>
       </div>

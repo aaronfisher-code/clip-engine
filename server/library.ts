@@ -42,6 +42,22 @@ export function managedDeletionTargets(
 
 export async function deleteManagedClipFiles(clip: Clip, jobs: PublishJob[]) {
   const targets = managedDeletionTargets(clip, jobs);
+  return deleteExistingManagedFiles(targets);
+}
+
+export function managedJobDeletionTargets(
+  job: PublishJob,
+  exportRoot = config.exportDir,
+) {
+  const outputPath = path.resolve(exportRoot, job.outputName);
+  return pathIsInside(exportRoot, outputPath) ? [outputPath] : [];
+}
+
+export async function deleteManagedJobFiles(job: PublishJob) {
+  return deleteExistingManagedFiles(managedJobDeletionTargets(job));
+}
+
+async function deleteExistingManagedFiles(targets: string[]) {
   const existing: string[] = [];
 
   for (const target of targets) {

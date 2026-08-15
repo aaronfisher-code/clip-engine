@@ -4,9 +4,10 @@ import path from "node:path";
 import express from "express";
 import multer from "multer";
 import { config, r2Configured } from "./config.js";
-import { deleteManagedClipFiles } from "./library.js";
+import { deleteManagedClipFiles, deleteManagedJobFiles } from "./library.js";
 import { makePreview, probeClip } from "./media.js";
 import { createPublishJob } from "./publisher.js";
+import { deleteR2Objects, publicR2Key } from "./r2.js";
 import { Store } from "./store.js";
 import type { Clip } from "./types.js";
 
@@ -145,6 +146,25 @@ app.get("/api/jobs/:id", (request, response) => {
   const job = store.job(request.params.id);
   if (!job) return response.status(404).json({ error: "Job not found." });
   response.json(job);
+});
+
+app.delete("/api/jobs/:id", async (request, response, next) => {
+  try {
+    const job = store.job(request.params.id);
+    if (!job) return response.status(404).json({ error: "Published version not found." });
+    if (["queued", "transcoding", "uploading"].includes(job.status)) {
+      return response.status(409).json({ error: "Wait for this export to finish before deleting it." });
+    }
+    const remoteKeys = job.remoteKeys || [job.url, job.mediaUrl, job.thumbnailUrl]
+      .flatMap((url) => url ? [publicR2Key(url)] : [])
+      .filter((key): key is string => Boolean(key));
+    const removedRemoteObjectCount = await deleteR2Objects(remoteKeys);
+    const removedFileCount = await deleteManagedJobFiles(job);
+    await store.deleteJob(job.id);
+    response.json({ deleted: true, removedFileCount, removedRemoteObjectCount });
+  } catch (error) {
+    next(error);
+  }
 });
 
 app.post("/api/clips/:id/publish", async (request, response, next) => {

@@ -13,6 +13,7 @@ export const api = {
   jobs: () => request<Job[]>("/api/jobs"),
   scan: () => request<{ count: number; clips: Clip[] }>("/api/clips/scan", { method: "POST" }),
   remove: (clipId: string) => request<{ deleted: boolean; removedFileCount: number }>(`/api/clips/${clipId}`, { method: "DELETE" }),
+  removeJob: (jobId: string) => request<{ deleted: boolean; removedFileCount: number; removedRemoteObjectCount: number }>(`/api/jobs/${jobId}`, { method: "DELETE" }),
   publish: (clipId: string, start: number, end: number, audioStreamIndexes: number[]) =>
     request<Job>(`/api/clips/${clipId}/publish`, {
       method: "POST",

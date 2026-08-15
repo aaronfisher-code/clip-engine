@@ -32,6 +32,11 @@ export async function createPublishJob(store: Store, clip: Clip, selection: Expo
     progress: 0,
     createdAt: new Date().toISOString(),
     outputName,
+    selection: {
+      start: selection.start,
+      end: selection.end,
+      audioStreamIndexes: [...selection.audioStreamIndexes],
+    },
   };
   await store.putJob(job);
 
@@ -59,6 +64,8 @@ async function runJob(store: Store, clip: Clip, job: PublishJob, selection: Expo
     const mediaKey = `media/${date}/${job.outputName}`;
     const thumbnailKey = `thumbnails/${date}/${assetStem}.jpg`;
     const pageKey = `clips/${assetStem}`;
+    job.remoteKeys = [mediaKey, thumbnailKey, pageKey];
+    await store.putJob(job);
 
     job.mediaUrl = await uploadFileToR2(outputPath, mediaKey, {
       contentType: "video/mp4",
@@ -76,6 +83,7 @@ async function runJob(store: Store, clip: Clip, job: PublishJob, selection: Expo
 
     const pageUrl = publicR2Url(pageKey);
     const publishedAt = new Date().toISOString();
+    job.publishedAt = publishedAt;
     const sharePage = createSharePage({
       title: displayName(clip.name),
       siteName: config.shareSiteName,
