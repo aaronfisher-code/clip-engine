@@ -708,8 +708,20 @@ impl ClipApp {
         if ui
             .selectable_label(self.library_area == area, label)
             .clicked()
+            && self.library_area != area
         {
             self.library_area = area;
+            let first = if area == LibraryArea::Published {
+                self.published_clips().first().map(|clip| clip.id.clone())
+            } else {
+                self.inbox_clips().first().map(|clip| clip.id.clone())
+            };
+            self.selected_id = first;
+            self.editor = None;
+            self.session_media = None;
+            if let Some(player) = &mut self.player {
+                player.unload();
+            }
         }
     }
 
@@ -855,20 +867,9 @@ impl ClipApp {
         let Some(media) = self.session_media.clone() else {
             return;
         };
-        let tracks = self
-            .editor
-            .as_ref()
-            .map(|editor| editor.tracks.clone())
-            .unwrap_or_default();
-        let muted = self.editor.as_ref().is_some_and(|editor| editor.muted);
-        let mix = self.editor.is_some();
         if let Some(player) = &mut self.player {
             if player.loaded_path() != Some(media.as_str()) {
                 let _ = player.load(&media);
-            }
-            if mix {
-                let _ = player.apply_audio(&tracks);
-                player.set_mute(muted);
             }
             if play {
                 player.play();
@@ -879,13 +880,20 @@ impl ClipApp {
     }
 
     fn toggle_playback(&mut self) {
-        if self.player.as_ref().is_some_and(|player| player.playing()) {
+        if self.player.as_ref().is_some_and(|player| player.wants_to_play()) {
             if let Some(player) = &self.player {
                 player.pause();
             }
         } else {
             self.activate_player(true);
         }
+    }
+
+    fn request_play(&mut self) {
+        if self.player.as_ref().is_some_and(|player| player.wants_to_play()) {
+            return;
+        }
+        self.activate_player(true);
     }
 
     fn step_frame(&mut self, delta: f64) {
@@ -1318,6 +1326,7 @@ impl ClipApp {
             if loaded {
                 player.pump_events();
                 player.flush_seek();
+                player.start_if_ready();
                 ui.painter().add(player.paint(rect.shrink(1.0)));
             }
         }
@@ -1347,7 +1356,11 @@ impl ClipApp {
             theme::buffering_overlay(ui, rect);
         }
         if response.clicked() {
-            self.toggle_playback();
+            if show_video {
+                self.toggle_playback();
+            } else {
+                self.request_play();
+            }
         }
     }
 
@@ -1355,7 +1368,7 @@ impl ClipApp {
         let time = self.playback_time();
         theme::inset().show(ui, |ui| {
             ui.horizontal(|ui| {
-                let playing = self.player.as_ref().is_some_and(|player| player.playing());
+                let playing = self.player.as_ref().is_some_and(|player| player.wants_to_play());
                 if ui
                     .add_sized(
                         [72.0, 28.0],
