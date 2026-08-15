@@ -118,7 +118,38 @@ export type ExportSelection = {
 
 export function videoEncoderArgs(encoder: string, preset: string, quality: number) {
   if (encoder.endsWith("_nvenc")) {
-    return ["-c:v", encoder, "-preset", preset === "medium" ? "p5" : preset, "-rc", "vbr", "-cq", String(quality), "-b:v", "0"];
+    return [
+      "-c:v", encoder,
+      "-preset", preset === "medium" ? "p5" : preset,
+      "-tune", "hq",
+      "-rc", "vbr",
+      "-cq", String(quality),
+      "-b:v", "20M",
+      "-maxrate", "30M",
+      "-bufsize", "60M",
+      "-multipass", "fullres",
+      "-spatial-aq", "1",
+      "-temporal-aq", "1",
+      "-aq-strength", "8",
+      "-rc-lookahead", "32",
+      "-bf", "3",
+      "-b_ref_mode", "middle",
+      "-g", "240",
+      "-profile:v", "high",
+    ];
+  }
+  if (encoder === "libx264") {
+    return [
+      "-c:v", encoder,
+      "-preset", preset,
+      "-crf", String(quality),
+      "-maxrate", "30M",
+      "-bufsize", "60M",
+      "-profile:v", "high",
+      "-level:v", "5.1",
+      "-g", "240",
+      "-keyint_min", "120",
+    ];
   }
   if (encoder.endsWith("_qsv")) {
     return ["-c:v", encoder, "-preset", preset, "-global_quality", String(quality)];
@@ -168,6 +199,23 @@ export function buildExportArgs(
     outputPath,
   );
   return args;
+}
+
+export function buildThumbnailArgs(videoPath: string, outputPath: string, duration: number) {
+  const seekTime = Math.max(0, Math.min(duration * 0.25, Math.max(0, duration - 0.1)));
+  return [
+    "-y", "-hide_banner", "-loglevel", "error",
+    "-ss", seekTime.toFixed(3),
+    "-i", videoPath,
+    "-frames:v", "1",
+    "-vf", "scale=1280:720:force_original_aspect_ratio=decrease:flags=lanczos,pad=1280:720:(ow-iw)/2:(oh-ih)/2",
+    "-q:v", "2",
+    outputPath,
+  ];
+}
+
+export async function makeThumbnail(videoPath: string, outputPath: string, duration: number) {
+  await runFfmpeg(buildThumbnailArgs(videoPath, outputPath, duration));
 }
 
 export async function exportClip(

@@ -11,8 +11,10 @@ The browser never receives R2 credentials and the service only listens on `127.0
 - Preview MKV and other browser-incompatible sources through an automatic 720p30 proxy.
 - Trim at source-frame increments and select any combination of audio tracks.
 - Mix the selected tracks into one AAC stream so browsers and Discord play the intended mix.
-- Transcode to a fast-start 1920×1080, 120 fps H.264 MP4.
-- Multipart-upload large exports to R2 with live progress and copy the custom-domain URL.
+- Transcode to a fast-start 1920×1080, 120 fps H.264 MP4 with stream-friendly NVENC rate control.
+- Multipart-upload large exports to R2 with live progress and copy a branded share-page URL.
+- Generate a 1280×720 thumbnail and Open Graph metadata for titled, playable Discord embeds.
+- Serve every published clip on a responsive public page with playback, sharing, and download controls.
 - Retain the original recording unchanged and persist the local library/job history.
 
 ## Prerequisites
@@ -40,7 +42,25 @@ R2_BUCKET=clips
 R2_PUBLIC_BASE_URL=https://clips.dab.dev
 ```
 
-Get the account ID and API token from **Cloudflare Dashboard → R2 Object Storage → Manage R2 API Tokens**. The public base URL is the custom domain connected to the bucket; Clip Engine uploads objects under `YYYY-MM-DD/clip-name-id.mp4`, so the result is a direct video URL such as `https://clips.dab.dev/2026-08-14/round-win-a1b2c3d4.mp4`.
+If OBS stores generic names such as `Track1`, give the audio streams useful fallback labels in recording-track order:
+
+```dotenv
+CLIP_AUDIO_TRACK_LABELS=Game / System,Discord,Microphone
+```
+
+Embedded non-generic track titles still take precedence, so recordings from other sources keep their own labels.
+
+Set the brand name used by public clip pages and Discord embeds if you do not want the default:
+
+```dotenv
+CLIP_SHARE_SITE_NAME=DAB Clips
+```
+
+Get the account ID and API token from **Cloudflare Dashboard → R2 Object Storage → Manage R2 API Tokens**. The public base URL must be a custom domain connected to the bucket. Each publish creates three immutable objects: the MP4 under `media/YYYY-MM-DD/`, a JPEG under `thumbnails/YYYY-MM-DD/`, and an extensionless HTML share page under `clips/`. Clip Engine copies the share-page URL, such as `https://clips.dab.dev/clips/round-win-a1b2c3d4`; the page advertises the direct MP4 to Discord as playable Open Graph video media.
+
+`CLIP_SHARE_SITE_NAME` controls the small brand name shown on the public page and in its embed metadata. Discord caches link previews, so changes affect new publishes immediately but an already-posted URL may retain its original preview for a while.
+
+Only newly published clips receive share pages and thumbnails. Existing R2 video URLs stay valid; publish a clip again if you want a new Discord-ready share link for it.
 
 For a production-style local run:
 
@@ -50,6 +70,41 @@ npm start
 ```
 
 Then open <http://127.0.0.1:4317>.
+
+## Run continuously as a Linux service
+
+Clip Engine includes a systemd user-service installer. It builds the production app, starts it in the background immediately, enables it for future logins, and restarts it if the process crashes:
+
+```bash
+npm run service:install
+```
+
+Bookmark <http://127.0.0.1:4317> and open it whenever you want to manage clips. A terminal does not need to stay open.
+
+Useful service commands:
+
+```bash
+npm run service:status    # Current state and recent output
+npm run service:logs      # Follow server and FFmpeg logs
+npm run service:restart   # Reload code or changes made to .env
+npm run service:remove    # Stop and remove only the service
+```
+
+The service normally starts when you log into the desktop. To start it during boot and keep it running after logout, enable systemd user lingering once:
+
+```bash
+loginctl enable-linger "$USER"
+```
+
+After updating Clip Engine, rebuild and restart the service:
+
+```bash
+npm install
+npm run build
+npm run service:restart
+```
+
+Changes to `.env` always require `npm run service:restart`. The installer stores the generated unit at `~/.config/systemd/user/clip-engine.service`; removing the service keeps `.env`, original recordings, previews, exports, and library history intact.
 
 ## Recording with OBS
 
@@ -63,17 +118,25 @@ Replay Buffer is a good capture front end: OBS already handles hotkeys, GPU capt
 
 The exact recording encoder and bitrate depend on the GPU. Recording to a high-quality hardware codec preserves quality without competing heavily with the game; the final shared file remains H.264 for dependable inline playback.
 
-## Export performance
+## Export quality and performance
 
-The default `libx264` encoder maximizes compatibility but 1080p120 software encoding can be demanding. NVIDIA users can enable hardware export:
+The default `libx264` encoder uses its `slow` preset, CRF 18, and a 30 Mbps ceiling. This retains broadly compatible 1080p120 H.264 playback while spending CPU time to get better quality from the available bitrate:
+
+```dotenv
+FFMPEG_VIDEO_ENCODER=libx264
+FFMPEG_PRESET=slow
+FFMPEG_CRF=18
+```
+
+NVIDIA users can trade some compression efficiency for faster hardware exports:
 
 ```dotenv
 FFMPEG_VIDEO_ENCODER=h264_nvenc
-FFMPEG_PRESET=p5
-FFMPEG_CRF=20
+FFMPEG_PRESET=p6
+FFMPEG_CRF=21
 ```
 
-For NVENC, `FFMPEG_CRF` is used as the constant-quality (`CQ`) value. Intel QSV (`h264_qsv`) and AMD AMF (`h264_amf`) are also recognized when supported by the local FFmpeg build. Hardware output quality and available encoders vary by driver.
+For NVENC, `FFMPEG_CRF` is used as the constant-quality (`CQ`) target. Clip Engine combines it with high-quality multipass encoding, adaptive quantization, a 20 Mbps target, and a 30 Mbps ceiling. Intel QSV (`h264_qsv`) and AMD AMF (`h264_amf`) are also recognized when supported by the local FFmpeg build. Hardware output quality and available encoders vary by driver.
 
 ## Local data
 

@@ -12,6 +12,7 @@ export const api = {
   clips: () => request<Clip[]>("/api/clips"),
   jobs: () => request<Job[]>("/api/jobs"),
   scan: () => request<{ count: number; clips: Clip[] }>("/api/clips/scan", { method: "POST" }),
+  remove: (clipId: string) => request<{ deleted: boolean; removedFileCount: number }>(`/api/clips/${clipId}`, { method: "DELETE" }),
   publish: (clipId: string, start: number, end: number, audioStreamIndexes: number[]) =>
     request<Job>(`/api/clips/${clipId}/publish`, {
       method: "POST",

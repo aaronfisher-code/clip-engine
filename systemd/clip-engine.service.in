@@ -1,0 +1,29 @@
+# Managed by Clip Engine. Run `npm run service:install` to regenerate this unit.
+[Unit]
+Description=Clip Engine local clipping service
+Documentation=file://@REPO_DIR@/README.md
+
+[Service]
+Type=simple
+WorkingDirectory=@REPO_DIR@
+Environment=NODE_ENV=production
+EnvironmentFile=@REPO_DIR@/.env
+ExecStart=@NODE_PATH@ @REPO_DIR@/dist-server/index.js
+Restart=on-failure
+RestartSec=3s
+TimeoutStopSec=20s
+UMask=0077
+
+# Safe service isolation that still permits FFmpeg hardware encoders.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=default.target

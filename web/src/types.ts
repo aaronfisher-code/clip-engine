@@ -32,11 +32,14 @@ export type Job = {
   createdAt: string;
   outputName: string;
   url?: string;
+  mediaUrl?: string;
+  thumbnailUrl?: string;
   error?: string;
 };
 
 export type AppConfig = {
   sourceDirectory: string;
+  audioTrackLabels: string[];
   r2Configured: boolean;
   publicBaseUrl: string | null;
   export: { width: number; height: number; fps: number; codec: string; crf: number };

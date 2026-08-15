@@ -10,7 +10,12 @@
     "build": "tsc -p tsconfig.server.json && vite build",
     "start": "node dist-server/index.js",
     "check": "tsc -p tsconfig.server.json --noEmit && tsc -p tsconfig.web.json --noEmit",
-    "test": "node --import tsx --test server/**/*.test.ts"
+    "test": "node --import tsx --test server/**/*.test.ts",
+    "service:install": "bash scripts/install-user-service.sh",
+    "service:remove": "bash scripts/remove-user-service.sh",
+    "service:restart": "systemctl --user restart clip-engine.service",
+    "service:status": "systemctl --user --no-pager --full status clip-engine.service",
+    "service:logs": "journalctl --user --unit clip-engine.service --follow"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.864.0",

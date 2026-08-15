@@ -35,6 +35,8 @@ export type PublishJob = {
   createdAt: string;
   outputName: string;
   url?: string;
+  mediaUrl?: string;
+  thumbnailUrl?: string;
   error?: string;
 };
 

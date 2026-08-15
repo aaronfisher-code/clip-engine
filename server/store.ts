@@ -49,12 +49,22 @@ export class Store {
     await this.save();
   }
 
+  async deleteClip(id: string) {
+    this.data.clips = this.data.clips.filter((clip) => clip.id !== id);
+    this.data.jobs = this.data.jobs.filter((job) => job.clipId !== id);
+    await this.save();
+  }
+
   jobs() {
     return [...this.data.jobs].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   }
 
   job(id: string) {
     return this.data.jobs.find((job) => job.id === id);
+  }
+
+  jobsForClip(clipId: string) {
+    return this.data.jobs.filter((job) => job.clipId === clipId);
   }
 
   async putJob(job: PublishJob) {

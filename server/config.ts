@@ -8,6 +8,11 @@ function positiveNumber(value: string | undefined, fallback: number) {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+function audioTrackLabels(value: string | undefined) {
+  if (!value) return [];
+  return value.split(",").map((label) => label.trim());
+}
+
 const root = process.cwd();
 const dataDir = path.resolve(root, process.env.CLIP_DATA_DIR || "data");
 
@@ -22,6 +27,8 @@ export const config = {
   port: positiveNumber(process.env.PORT, 4317),
   ffmpeg: process.env.FFMPEG_PATH || "ffmpeg",
   ffprobe: process.env.FFPROBE_PATH || "ffprobe",
+  audioTrackLabels: audioTrackLabels(process.env.CLIP_AUDIO_TRACK_LABELS),
+  shareSiteName: process.env.CLIP_SHARE_SITE_NAME?.trim() || "Dabs Clip Engine",
   videoEncoder: process.env.FFMPEG_VIDEO_ENCODER || "libx264",
   preset: process.env.FFMPEG_PRESET || "medium",
   crf: positiveNumber(process.env.FFMPEG_CRF, 20),

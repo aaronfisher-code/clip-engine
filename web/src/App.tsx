@@ -15,8 +15,19 @@ function formatBytes(bytes: number) {
   return `${(bytes / 1024 ** index).toFixed(index > 1 ? 1 : 0)} ${units[index]}`;
 }
 
-function trackName(track: Clip["audioTracks"][number]) {
-  return track.title || track.language || `Audio ${track.ordinal + 1}`;
+function trackName(track: Clip["audioTracks"][number], configuredLabels: string[] = []) {
+  const embeddedTitle = track.title?.trim();
+  const titleIsGeneric = embeddedTitle
+    ? /^(?:(?:audio\s*)?track|audio)\s*\d+$/i.test(embeddedTitle)
+    : false;
+  if (embeddedTitle && !titleIsGeneric) return embeddedTitle;
+
+  const configuredLabel = configuredLabels[track.ordinal]?.trim();
+  if (configuredLabel) return configuredLabel;
+
+  const language = track.language?.trim();
+  if (language && language.toLowerCase() !== "und") return language;
+  return `Audio ${track.ordinal + 1}`;
 }
 
 export function App() {
@@ -24,6 +35,7 @@ export function App() {
   const [clips, setClips] = useState<Clip[]>([]);
   const [selectedId, setSelectedId] = useState<string>();
   const [jobs, setJobs] = useState<Job[]>([]);
+  const [libraryArea, setLibraryArea] = useState<"inbox" | "published">("inbox");
   const [busy, setBusy] = useState(false);
   const [dragActive, setDragActive] = useState(false);
   const [notice, setNotice] = useState<string>();
@@ -35,7 +47,7 @@ export function App() {
     const [nextClips, nextJobs] = await Promise.all([api.clips(), api.jobs()]);
     setClips(nextClips);
     setJobs(nextJobs);
-    setSelectedId((current) => current || nextClips[0]?.id);
+    setSelectedId((current) => nextClips.some((clip) => clip.id === current) ? current : nextClips[0]?.id);
   }, []);
 
   useEffect(() => {
@@ -44,7 +56,10 @@ export function App() {
         setConfig(nextConfig);
         setClips(nextClips);
         setJobs(nextJobs);
-        setSelectedId(nextClips[0]?.id);
+        const publishedIds = new Set(nextJobs.filter((job) => job.status === "complete" && job.url).map((job) => job.clipId));
+        const firstClip = nextClips.find((clip) => !publishedIds.has(clip.id)) || nextClips[0];
+        setSelectedId(firstClip?.id);
+        setLibraryArea(firstClip && publishedIds.has(firstClip.id) ? "published" : "inbox");
       })
       .catch((reason) => setError(reason.message));
   }, []);
@@ -59,6 +74,17 @@ export function App() {
 
   const selected = clips.find((clip) => clip.id === selectedId);
   const selectedJobs = jobs.filter((job) => job.clipId === selectedId);
+  const publishedJobs = new Map<string, Job>();
+  for (const job of jobs) {
+    if (job.status === "complete" && job.url && !publishedJobs.has(job.clipId)) publishedJobs.set(job.clipId, job);
+  }
+  const inboxClips = clips.filter((clip) => !publishedJobs.has(clip.id));
+  const publishedClips = clips.filter((clip) => publishedJobs.has(clip.id));
+  const visibleClips = libraryArea === "published" ? publishedClips : inboxClips;
+
+  useEffect(() => {
+    if (selectedId && publishedJobs.has(selectedId)) setLibraryArea("published");
+  }, [jobs, selectedId]);
 
   async function run(action: () => Promise<void>) {
     setBusy(true);
@@ -78,9 +104,24 @@ export function App() {
     void run(async () => {
       const result = await api.import(files);
       await refresh();
+      setLibraryArea("inbox");
       setSelectedId(result.clips[0]?.id);
       setNotice(`${result.clips.length} recording${result.clips.length === 1 ? "" : "s"} imported.`);
     });
+  }
+
+  function chooseLibraryArea(area: "inbox" | "published") {
+    setLibraryArea(area);
+    const candidates = area === "published" ? publishedClips : inboxClips;
+    setSelectedId((current) => candidates.some((clip) => clip.id === current) ? current : candidates[0]?.id);
+  }
+
+  function copyPublishedLink(clipId: string) {
+    const url = publishedJobs.get(clipId)?.url;
+    if (!url) return;
+    void navigator.clipboard.writeText(url)
+      .then(() => setNotice("Published link copied."))
+      .catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)));
   }
 
   function isFileDrag(event: DragEvent) {
@@ -127,7 +168,7 @@ export function App() {
         <div className="brand">
           <span className="brand-mark"><i /></span>
           <div>
-            <strong>Clip Engine</strong>
+            <strong>Dabs Clip Engine</strong>
             <span>Local 120 fps workflow</span>
           </div>
         </div>
@@ -173,25 +214,37 @@ export function App() {
             <span>Watching</span>{config?.sourceDirectory || "Loading…"}
           </div>
 
+          <div className="library-tabs" role="tablist" aria-label="Clip areas">
+            <button role="tab" aria-selected={libraryArea === "inbox"} className={libraryArea === "inbox" ? "active" : ""} onClick={() => chooseLibraryArea("inbox")}>
+              Inbox <span>{inboxClips.length}</span>
+            </button>
+            <button role="tab" aria-selected={libraryArea === "published"} className={libraryArea === "published" ? "active" : ""} onClick={() => chooseLibraryArea("published")}>
+              Published <span>{publishedClips.length}</span>
+            </button>
+          </div>
+
           <div className="clip-list">
-            {clips.map((clip) => (
-              <button key={clip.id} className={`clip-row ${clip.id === selectedId ? "active" : ""}`} onClick={() => setSelectedId(clip.id)}>
-                <div className="thumb">
-                  {clip.previewStatus === "ready" ? <video src={`/api/clips/${clip.id}/media#t=0.1`} preload="metadata" muted /> : <span>{clip.previewStatus === "failed" ? "!" : "···"}</span>}
-                  <em>{formatDuration(clip.duration)}</em>
-                </div>
-                <div className="clip-copy">
-                  <strong>{clip.name}</strong>
-                  <span>{clip.width}×{clip.height} · {Math.round(clip.fps)} fps</span>
-                  <small>{new Date(clip.createdAt).toLocaleString()}</small>
-                </div>
-              </button>
+            {visibleClips.map((clip) => (
+              <div key={clip.id} className={`clip-row-wrap ${libraryArea === "published" ? "published" : ""}`}>
+                <button className={`clip-row ${clip.id === selectedId ? "active" : ""}`} onClick={() => setSelectedId(clip.id)}>
+                  <div className="thumb">
+                    {clip.previewStatus === "ready" ? <video src={`/api/clips/${clip.id}/media#t=0.1`} preload="metadata" muted /> : <span>{clip.previewStatus === "failed" ? "!" : "···"}</span>}
+                    <em>{formatDuration(clip.duration)}</em>
+                  </div>
+                  <div className="clip-copy">
+                    <strong>{clip.name}</strong>
+                    <span>{clip.width}×{clip.height} · {Math.round(clip.fps)} fps</span>
+                    <small>{new Date(clip.createdAt).toLocaleString()}</small>
+                  </div>
+                </button>
+                {publishedJobs.get(clip.id)?.url && <button className="quick-link" title="Copy published link" aria-label={`Copy published link for ${clip.name}`} onClick={() => copyPublishedLink(clip.id)}>⧉</button>}
+              </div>
             ))}
-            {!clips.length && (
+            {!visibleClips.length && (
               <div className="empty-library">
                 <span>⌁</span>
-                <strong>No recordings yet</strong>
-                <p>Import a file or place OBS clips in the watched folder.</p>
+                <strong>{libraryArea === "published" ? "Nothing published yet" : "Inbox is clear"}</strong>
+                <p>{libraryArea === "published" ? "Completed exports move here with their share links." : "Import a file or save a new OBS replay."}</p>
               </div>
             )}
           </div>
@@ -200,7 +253,17 @@ export function App() {
         <section className="editor-panel">
           {(error || notice) && <div className={`toast ${error ? "error" : ""}`}><span>{error ? "!" : "✓"}</span>{error || notice}<button onClick={() => { setError(undefined); setNotice(undefined); }}>×</button></div>}
           {selected ? (
-            <Editor key={selected.id} clip={selected} jobs={selectedJobs} config={config} onPublish={(start, end, tracks) => run(async () => {
+            <Editor key={selected.id} clip={selected} jobs={selectedJobs} config={config} busy={busy} onDelete={() => {
+              const confirmed = window.confirm(`Delete "${selected.name}"?\n\nThis permanently removes the local recording, preview, local exports, and Dabs Clip Engine history. Existing Cloudflare R2 uploads stay online, so copy any link you still need first.`);
+              if (!confirmed) return;
+              void run(async () => {
+                await api.remove(selected.id);
+                setClips((current) => current.filter((clip) => clip.id !== selected.id));
+                setJobs((current) => current.filter((job) => job.clipId !== selected.id));
+                setSelectedId(visibleClips.find((clip) => clip.id !== selected.id)?.id);
+                setNotice("Local clip deleted. Existing R2 uploads were left online.");
+              });
+            }} onPublish={(start, end, tracks) => run(async () => {
               const job = await api.publish(selected.id, start, end, tracks);
               setJobs((current) => [job, ...current]);
               setNotice("Export queued. You can keep editing while it runs.");
@@ -219,10 +282,12 @@ export function App() {
   );
 }
 
-function Editor({ clip, jobs, config, onPublish }: {
+function Editor({ clip, jobs, config, busy, onDelete, onPublish }: {
   clip: Clip;
   jobs: Job[];
   config?: AppConfig;
+  busy: boolean;
+  onDelete: () => void;
   onPublish: (start: number, end: number, tracks: number[]) => void;
 }) {
   const frameStep = 1 / Math.max(1, clip.fps || 120);
@@ -257,82 +322,90 @@ function Editor({ clip, jobs, config, onPublish }: {
           <h1>{clip.name}</h1>
           <p>{clip.width}×{clip.height} <b>·</b> {clip.fps.toFixed(2)} fps <b>·</b> {clip.videoCodec.toUpperCase()} <b>·</b> {formatBytes(clip.size)}</p>
         </div>
-        <span className="output-pill">Output&nbsp; {config?.export.width || 1920}×{config?.export.height || 1080} / {config?.export.fps || 120} fps</span>
+        <div className="editor-actions">
+          <span className="output-pill">Output&nbsp; {config?.export.width || 1920}×{config?.export.height || 1080} / {config?.export.fps || 120} fps</span>
+          <button className="delete-button" disabled={busy || Boolean(activeJob)} title={activeJob ? "Wait for the active export to finish" : "Delete this local clip"} onClick={onDelete}>Delete clip</button>
+        </div>
       </div>
 
-      <div className="preview-stage">
-        {clip.previewStatus === "ready" ? (
-          <video ref={video} src={`/api/clips/${clip.id}/media`} controls playsInline onTimeUpdate={(event) => {
-            if (event.currentTarget.currentTime >= end) event.currentTarget.pause();
-          }} />
-        ) : clip.previewStatus === "failed" ? (
-          <div className="preview-message failed"><strong>Preview failed</strong><span>{clip.previewError}</span></div>
-        ) : (
-          <div className="preview-message"><i /><strong>Preparing browser preview</strong><span>The original recording stays untouched.</span></div>
-        )}
-      </div>
-
-      <section className="trim-card">
-        <div className="card-heading">
-          <div><span className="step">01</span><div><strong>Trim</strong><small>Select the moment worth keeping</small></div></div>
-          <span className="selection-length">{formatDuration(end - start)} selected</span>
-        </div>
-        <div className="timeline">
-          <div className="timeline-track" />
-          <div className="selection" style={{ left: `${(start / clip.duration) * 100}%`, right: `${100 - (end / clip.duration) * 100}%` }} />
-          <input aria-label="Trim start" type="range" min="0" max={clip.duration} step={frameStep} value={start} onChange={(event) => changeStart(Number(event.target.value))} />
-          <input aria-label="Trim end" type="range" min="0" max={clip.duration} step={frameStep} value={end} onChange={(event) => changeEnd(Number(event.target.value))} />
-        </div>
-        <div className="time-inputs">
-          <label><span>In point</span><input type="number" min="0" max={end - frameStep} step={frameStep} value={start.toFixed(3)} onChange={(event) => changeStart(Number(event.target.value))} /><small>seconds</small></label>
-          <button onClick={() => { setStart(0); setEnd(clip.duration); }}>Reset</button>
-          <label><span>Out point</span><input type="number" min={start + frameStep} max={clip.duration} step={frameStep} value={end.toFixed(3)} onChange={(event) => changeEnd(Number(event.target.value))} /><small>seconds</small></label>
-        </div>
-      </section>
-
-      <section className="audio-card">
-        <div className="card-heading">
-          <div><span className="step">02</span><div><strong>Audio mix</strong><small>Selected tracks are mixed for reliable playback</small></div></div>
-          <span className="selection-length">{tracks.length} of {clip.audioTracks.length} tracks</span>
-        </div>
-        <div className="track-grid">
-          {clip.audioTracks.map((track) => {
-            const selected = tracks.includes(track.streamIndex);
-            return <button key={track.streamIndex} className={`track ${selected ? "selected" : ""}`} onClick={() => setTracks((current) => selected ? current.filter((index) => index !== track.streamIndex) : [...current, track.streamIndex])}>
-              <span className="check">{selected ? "✓" : ""}</span>
-              <span className="track-icon">≋</span>
-              <span><strong>{trackName(track)}</strong><small>{track.codec.toUpperCase()} · {track.channelLayout || `${track.channels} channels`}</small></span>
-            </button>;
-          })}
-          {!clip.audioTracks.length && <p className="no-audio">This recording has no audio tracks. It will be exported silently.</p>}
-        </div>
-      </section>
-
-      <section className="publish-card">
-        <div className="publish-copy">
-          <span className="step">03</span>
-          <div><strong>Transcode & publish</strong><small>{config?.export.codec || "libx264"} · CRF {config?.export.crf || 20} · fast-start MP4</small></div>
-        </div>
-        {activeJob ? (
-          <div className="job-progress">
-            <div><span>{activeJob.status === "uploading" ? "Uploading to R2" : "Transcoding locally"}</span><strong>{Math.round(activeJob.progress * 100)}%</strong></div>
-            <progress value={activeJob.progress} max="1" />
+      <div className="editor-content">
+        <div className="preview-column">
+          <div className="preview-stage">
+            {clip.previewStatus === "ready" ? (
+              <video ref={video} src={`/api/clips/${clip.id}/media`} controls playsInline onTimeUpdate={(event) => {
+                if (event.currentTarget.currentTime >= end) event.currentTarget.pause();
+              }} />
+            ) : clip.previewStatus === "failed" ? (
+              <div className="preview-message failed"><strong>Preview failed</strong><span>{clip.previewError}</span></div>
+            ) : (
+              <div className="preview-message"><i /><strong>Preparing browser preview</strong><span>The original recording stays untouched.</span></div>
+            )}
           </div>
-        ) : (
-          <button className="publish-button" disabled={!config?.r2Configured} title={!config?.r2Configured ? "Add R2 credentials to .env first" : ""} onClick={() => onPublish(start, end, tracks)}>
-            <span>↑</span> Publish clip
-          </button>
-        )}
-      </section>
-
-      {jobs.find((job) => job.status === "failed")?.error && <div className="job-error"><strong>Publish failed</strong>{jobs.find((job) => job.status === "failed")?.error}</div>}
-      {completedJob?.url && (
-        <div className="share-result">
-          <span>✓</span>
-          <div><strong>Your clip is live</strong><a href={completedJob.url} target="_blank" rel="noreferrer">{completedJob.url}</a></div>
-          <button onClick={() => void navigator.clipboard.writeText(completedJob.url!)}>Copy link</button>
+          <section className="trim-card">
+            <div className="card-heading">
+              <div><span className="step">01</span><div><strong>Trim</strong><small>Select the moment worth keeping</small></div></div>
+              <span className="selection-length">{formatDuration(end - start)} selected</span>
+            </div>
+            <div className="timeline">
+              <div className="timeline-track" />
+              <div className="selection" style={{ left: `${(start / clip.duration) * 100}%`, right: `${100 - (end / clip.duration) * 100}%` }} />
+              <input aria-label="Trim start" type="range" min="0" max={clip.duration} step={frameStep} value={start} onChange={(event) => changeStart(Number(event.target.value))} />
+              <input aria-label="Trim end" type="range" min="0" max={clip.duration} step={frameStep} value={end} onChange={(event) => changeEnd(Number(event.target.value))} />
+            </div>
+            <div className="time-inputs">
+              <label><span>In point</span><input type="number" min="0" max={end - frameStep} step={frameStep} value={start.toFixed(3)} onChange={(event) => changeStart(Number(event.target.value))} /><small>seconds</small></label>
+              <button onClick={() => { setStart(0); setEnd(clip.duration); }}>Reset</button>
+              <label><span>Out point</span><input type="number" min={start + frameStep} max={clip.duration} step={frameStep} value={end.toFixed(3)} onChange={(event) => changeEnd(Number(event.target.value))} /><small>seconds</small></label>
+            </div>
+          </section>
         </div>
-      )}
+
+        <div className="control-column">
+          <section className="audio-card">
+            <div className="card-heading">
+              <div><span className="step">02</span><div><strong>Audio mix</strong><small>Selected tracks are mixed for reliable playback</small></div></div>
+              <span className="selection-length">{tracks.length} of {clip.audioTracks.length} tracks</span>
+            </div>
+            <div className="track-grid">
+              {clip.audioTracks.map((track) => {
+                const selected = tracks.includes(track.streamIndex);
+                return <button key={track.streamIndex} className={`track ${selected ? "selected" : ""}`} onClick={() => setTracks((current) => selected ? current.filter((index) => index !== track.streamIndex) : [...current, track.streamIndex])}>
+                  <span className="check">{selected ? "✓" : ""}</span>
+                  <span className="track-icon">≋</span>
+                  <span><strong>{trackName(track, config?.audioTrackLabels)}</strong><small>Track {track.ordinal + 1} · {track.codec.toUpperCase()} · {track.channelLayout || `${track.channels} channels`}</small></span>
+                </button>;
+              })}
+              {!clip.audioTracks.length && <p className="no-audio">This recording has no audio tracks. It will be exported silently.</p>}
+            </div>
+          </section>
+
+          <section className="publish-card">
+            <div className="publish-copy">
+              <span className="step">03</span>
+              <div><strong>Transcode & publish</strong><small>{config?.export.codec || "libx264"} · CRF {config?.export.crf || 20} · fast-start MP4</small></div>
+            </div>
+            {activeJob ? (
+              <div className="job-progress">
+                <div><span>{activeJob.status === "uploading" ? "Uploading to R2" : "Transcoding locally"}</span><strong>{Math.round(activeJob.progress * 100)}%</strong></div>
+                <progress value={activeJob.progress} max="1" />
+              </div>
+            ) : (
+              <button className="publish-button" disabled={!config?.r2Configured} title={!config?.r2Configured ? "Add R2 credentials to .env first" : ""} onClick={() => onPublish(start, end, tracks)}>
+                <span>↑</span> Publish clip
+              </button>
+            )}
+          </section>
+
+          {jobs.find((job) => job.status === "failed")?.error && <div className="job-error"><strong>Publish failed</strong>{jobs.find((job) => job.status === "failed")?.error}</div>}
+          {completedJob?.url && (
+            <div className="share-result">
+              <span>✓</span>
+              <div><strong>Your Discord-ready clip is live</strong><a href={completedJob.url} target="_blank" rel="noreferrer">{completedJob.url}</a></div>
+              <button onClick={() => void navigator.clipboard.writeText(completedJob.url!)}>Copy link</button>
+            </div>
+          )}
+        </div>
+      </div>
     </div>
   );
 }

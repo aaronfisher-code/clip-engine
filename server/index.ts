@@ -4,6 +4,7 @@ import path from "node:path";
 import express from "express";
 import multer from "multer";
 import { config, r2Configured } from "./config.js";
+import { deleteManagedClipFiles } from "./library.js";
 import { makePreview, probeClip } from "./media.js";
 import { createPublishJob } from "./publisher.js";
 import { Store } from "./store.js";
@@ -42,6 +43,7 @@ function queuePreview(clip: Clip) {
       await store.putClip(clip);
     })
     .catch(async (error) => {
+      console.error(`Preview generation failed for ${clip.name}:`, error);
       clip.previewStatus = "failed";
       clip.previewError = error instanceof Error ? error.message : String(error);
       await store.putClip(clip);
@@ -69,6 +71,7 @@ for (const clip of store.clips()) {
 app.get("/api/config", (_request, response) => {
   response.json({
     sourceDirectory: config.sourceDir,
+    audioTrackLabels: config.audioTrackLabels,
     r2Configured: r2Configured(),
     publicBaseUrl: config.r2.publicBaseUrl || null,
     export: { width: 1920, height: 1080, fps: 120, codec: config.videoEncoder, crf: config.crf },
@@ -119,6 +122,22 @@ app.get("/api/clips/:id/media", (request, response) => {
     return response.status(409).json({ error: "The browser preview is still being prepared." });
   }
   response.sendFile(clip.previewPath);
+});
+
+app.delete("/api/clips/:id", async (request, response, next) => {
+  try {
+    const clip = store.clip(request.params.id);
+    if (!clip) return response.status(404).json({ error: "Clip not found." });
+    const jobs = store.jobsForClip(clip.id);
+    if (jobs.some((job) => ["queued", "transcoding", "uploading"].includes(job.status))) {
+      return response.status(409).json({ error: "Wait for the active export to finish before deleting this clip." });
+    }
+    const removedFileCount = await deleteManagedClipFiles(clip, jobs);
+    await store.deleteClip(clip.id);
+    response.json({ deleted: true, removedFileCount });
+  } catch (error) {
+    next(error);
+  }
 });
 
 app.get("/api/jobs", (_request, response) => response.json(store.jobs()));
