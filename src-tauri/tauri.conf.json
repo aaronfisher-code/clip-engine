@@ -1,0 +1,50 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Clip Engine",
+  "version": "1.0.0",
+  "identifier": "dev.dab.clip-engine",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:4318",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "DAB Clip Engine",
+        "width": 1440,
+        "height": 900,
+        "minWidth": 900,
+        "minHeight": 620,
+        "center": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; img-src 'self' asset: http://asset.localhost http://127.0.0.1:* data: https://media.clips.dab.dev; media-src 'self' asset: http://asset.localhost http://127.0.0.1:*; connect-src 'self' ipc: http://ipc.localhost; style-src 'self' 'unsafe-inline'; script-src 'self'",
+      "assetProtocol": {
+        "enable": true,
+        "scope": ["$APPLOCALDATA/**"]
+      }
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "category": "Video",
+    "shortDescription": "Edit and publish game clips",
+    "longDescription": "A local-first editor for trimming, mixing, transcoding and securely publishing game clips.",
+    "createUpdaterArtifacts": true,
+    "resources": ["binaries", "THIRD_PARTY_NOTICES.md"],
+    "windows": {
+      "nsis": { "installMode": "currentUser" },
+      "webviewInstallMode": { "type": "downloadBootstrapper", "silent": true }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": ["https://github.com/aaronfisher-code/clip-engine/releases/latest/download/latest.json"],
+      "pubkey": "REPLACE_WITH_TAURI_UPDATER_PUBLIC_KEY"
+    }
+  }
+}

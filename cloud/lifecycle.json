@@ -1,0 +1,20 @@
+{
+  "rules": [
+    {
+      "id": "expire-published-clips-after-30-days",
+      "enabled": true,
+      "conditions": { "prefix": "published/" },
+      "deleteObjectsTransition": {
+        "condition": { "type": "Age", "maxAge": 2592000 }
+      }
+    },
+    {
+      "id": "abort-incomplete-uploads-after-one-day",
+      "enabled": true,
+      "conditions": { "prefix": "published/" },
+      "abortMultipartUploadsTransition": {
+        "condition": { "type": "Age", "maxAge": 86400 }
+      }
+    }
+  ]
+}

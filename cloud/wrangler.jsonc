@@ -1,0 +1,36 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "clip-engine-api",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-15",
+  "workers_dev": true,
+  "routes": [
+    { "pattern": "api.clips.dab.dev", "custom_domain": true },
+    { "pattern": "clips.dab.dev", "custom_domain": true }
+  ],
+  "observability": { "enabled": true },
+  "vars": {
+    "APP_BASE_URL": "https://clips.dab.dev",
+    "MEDIA_BASE_URL": "https://media.clips.dab.dev",
+    "R2_ACCOUNT_ID": "8adbce55fdc4bb6e69dd42b1bde26578",
+    "R2_BUCKET_NAME": "clip-engine-media-prod",
+    "R2_PARENT_ACCESS_KEY_ID": "82abbf580f67d4f980f49c22ffccef67",
+    "CLIP_TTL_DAYS": "30",
+    "MAX_UPLOAD_BYTES": "5368709120"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "clip-engine-prod",
+      "database_id": "ad4d8a2f-f3ec-4558-95c3-73b2cfd76996",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "MEDIA",
+      "bucket_name": "clip-engine-media-prod"
+    }
+  ],
+  "triggers": { "crons": ["17 * * * *"] }
+}

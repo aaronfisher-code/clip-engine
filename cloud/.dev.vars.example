@@ -1,0 +1,3 @@
+BOOTSTRAP_TOKEN=generate-at-least-32-random-bytes
+TOKEN_PEPPER=generate-a-different-32-byte-secret
+R2_PARENT_SECRET_ACCESS_KEY=parent-r2-secret-access-key-matching-R2_PARENT_ACCESS_KEY_ID
