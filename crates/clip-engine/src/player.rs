@@ -1,0 +1,746 @@
+use eframe::egui::{self, PaintCallback, Rect};
+use eframe::egui_glow::CallbackFn;
+use glow::HasContext;
+use raw_window_handle::{DisplayHandle, RawDisplayHandle};
+use std::ffi::{CStr, CString};
+use std::os::raw::{c_char, c_int, c_void};
+use std::ptr;
+use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+const MPV_FORMAT_FLAG: i32 = 3;
+const MPV_FORMAT_DOUBLE: i32 = 5;
+const MPV_RENDER_PARAM_INVALID: u32 = 0;
+const MPV_RENDER_PARAM_API_TYPE: u32 = 1;
+const MPV_RENDER_PARAM_OPENGL_INIT_PARAMS: u32 = 2;
+const MPV_RENDER_PARAM_OPENGL_FBO: u32 = 3;
+const MPV_RENDER_PARAM_FLIP_Y: u32 = 4;
+const MPV_RENDER_PARAM_X11_DISPLAY: u32 = 8;
+const MPV_RENDER_PARAM_WL_DISPLAY: u32 = 9;
+const MPV_RENDER_PARAM_BLOCK_FOR_TARGET_TIME: u32 = 12;
+const MPV_RENDER_UPDATE_FRAME: u64 = 1;
+
+#[repr(C)]
+struct MpvHandle {
+    _private: [u8; 0],
+}
+
+#[repr(C)]
+struct MpvRenderContext {
+    _private: [u8; 0],
+}
+
+#[repr(C)]
+struct MpvRenderParam {
+    type_: u32,
+    data: *mut c_void,
+}
+
+#[repr(C)]
+struct MpvOpenglInitParams {
+    get_proc_address: unsafe extern "C" fn(*mut c_void, *const c_char) -> *mut c_void,
+    get_proc_address_ctx: *mut c_void,
+}
+
+#[repr(C)]
+struct MpvOpenglFbo {
+    fbo: i32,
+    w: i32,
+    h: i32,
+    internal_format: i32,
+}
+
+#[repr(C)]
+struct MpvEvent {
+    event_id: i32,
+    error: i32,
+    reply_userdata: u64,
+    data: *mut c_void,
+}
+
+const MPV_EVENT_NONE: i32 = 0;
+const MPV_EVENT_FILE_LOADED: i32 = 8;
+
+#[link(name = "mpv")]
+unsafe extern "C" {
+    fn mpv_create() -> *mut MpvHandle;
+    fn mpv_initialize(ctx: *mut MpvHandle) -> c_int;
+    fn mpv_terminate_destroy(ctx: *mut MpvHandle);
+    fn mpv_set_option_string(
+        ctx: *mut MpvHandle,
+        name: *const c_char,
+        data: *const c_char,
+    ) -> c_int;
+    fn mpv_command(ctx: *mut MpvHandle, args: *mut *const c_char) -> c_int;
+    fn mpv_set_property_string(
+        ctx: *mut MpvHandle,
+        name: *const c_char,
+        data: *const c_char,
+    ) -> c_int;
+    fn mpv_get_property(
+        ctx: *mut MpvHandle,
+        name: *const c_char,
+        format: i32,
+        data: *mut c_void,
+    ) -> c_int;
+    fn mpv_get_property_string(ctx: *mut MpvHandle, name: *const c_char) -> *mut c_char;
+    fn mpv_free(data: *mut c_void);
+    fn mpv_error_string(error: c_int) -> *const c_char;
+    fn mpv_wait_event(ctx: *mut MpvHandle, timeout: f64) -> *mut MpvEvent;
+    fn mpv_render_context_create(
+        res: *mut *mut MpvRenderContext,
+        mpv: *mut MpvHandle,
+        params: *mut MpvRenderParam,
+    ) -> c_int;
+    fn mpv_render_context_free(ctx: *mut MpvRenderContext);
+    fn mpv_render_context_render(ctx: *mut MpvRenderContext, params: *mut MpvRenderParam) -> c_int;
+    fn mpv_render_context_update(ctx: *mut MpvRenderContext) -> u64;
+    fn mpv_render_context_report_swap(ctx: *mut MpvRenderContext);
+    fn mpv_render_context_set_update_callback(
+        ctx: *mut MpvRenderContext,
+        callback: unsafe extern "C" fn(*mut c_void),
+        callback_ctx: *mut c_void,
+    );
+}
+
+#[cfg(unix)]
+#[link(name = "EGL")]
+unsafe extern "C" {
+    fn eglGetProcAddress(procname: *const c_char) -> *mut c_void;
+}
+
+struct GlTarget {
+    fbo: glow::Framebuffer,
+    texture: glow::Texture,
+    width: i32,
+    height: i32,
+}
+
+struct RenderShared {
+    render: AtomicPtr<MpvRenderContext>,
+    target: Mutex<Option<GlTarget>>,
+    awaiting_frame: AtomicBool,
+    resume_after_seek: AtomicBool,
+}
+
+pub struct Player {
+    handle: *mut MpvHandle,
+    render: *mut MpvRenderContext,
+    shared: Arc<RenderShared>,
+    callback: Arc<CallbackFn>,
+    update_ctx: *mut egui::Context,
+    loaded_path: Option<String>,
+    pending_seek: Option<f64>,
+    last_seek: Instant,
+    audio_signature: Option<Vec<i64>>,
+}
+
+unsafe impl Send for Player {}
+
+impl Player {
+    pub fn new(
+        ctx: &egui::Context,
+        _get_proc_address: Option<&dyn Fn(&CStr) -> *const c_void>,
+        display: Option<DisplayHandle<'_>>,
+    ) -> anyhow::Result<Self> {
+        unsafe {
+            let handle = mpv_create();
+            if handle.is_null() {
+                anyhow::bail!("Could not create the libmpv player");
+            }
+            set_option(handle, "vo", "libmpv")?;
+            set_option(handle, "hwdec", "auto")?;
+            set_option(handle, "gpu-hwdec-interop", "auto")?;
+            set_option(handle, "pause", "yes")?;
+            set_option(handle, "hr-seek", "yes")?;
+            set_option(handle, "keep-open", "yes")?;
+            set_option(handle, "idle", "yes")?;
+            set_option(handle, "osc", "no")?;
+            set_option(handle, "osd-level", "0")?;
+            set_option(handle, "input-default-bindings", "no")?;
+            set_option(handle, "input-vo-keyboard", "no")?;
+            set_option(handle, "audio-display", "no")?;
+            set_option(handle, "interpolation", "no")?;
+            set_option(handle, "video-sync", "audio")?;
+            set_option(handle, "video-timing-offset", "0")?;
+            set_option(handle, "vd-lavc-dr", "yes")?;
+            set_option(handle, "framedrop", "vo")?;
+            set_option(handle, "cache", "auto")?;
+            set_option(handle, "cache-pause", "yes")?;
+            let _ = set_option(handle, "terminal", "no");
+            let _ = set_option(handle, "msg-level", "all=error");
+            let _ = set_option(handle, "mute", "no");
+            let _ = set_option(handle, "volume", "100");
+            let _ = set_option(handle, "ao", "pipewire,pulse,alsa");
+            check(mpv_initialize(handle))?;
+
+            let mut init = MpvOpenglInitParams {
+                get_proc_address: gl_get_proc_address,
+                get_proc_address_ctx: ptr::null_mut(),
+            };
+            let api = CString::new("opengl").unwrap();
+            let mut display_param = MpvRenderParam {
+                type_: MPV_RENDER_PARAM_INVALID,
+                data: ptr::null_mut(),
+            };
+            let mut display_ptr = ptr::null_mut::<c_void>();
+            if let Some(display) = display {
+                match display.as_raw() {
+                    RawDisplayHandle::Wayland(wayland) => {
+                        display_ptr = wayland.display.as_ptr();
+                        display_param.type_ = MPV_RENDER_PARAM_WL_DISPLAY;
+                        display_param.data = display_ptr;
+                    }
+                    RawDisplayHandle::Xlib(xlib) => {
+                        if let Some(display) = xlib.display {
+                            display_ptr = display.as_ptr();
+                            display_param.type_ = MPV_RENDER_PARAM_X11_DISPLAY;
+                            display_param.data = display_ptr;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let _ = display_ptr;
+            let mut params = [
+                MpvRenderParam {
+                    type_: MPV_RENDER_PARAM_API_TYPE,
+                    data: api.as_ptr().cast_mut().cast(),
+                },
+                MpvRenderParam {
+                    type_: MPV_RENDER_PARAM_OPENGL_INIT_PARAMS,
+                    data: (&mut init as *mut MpvOpenglInitParams).cast(),
+                },
+                display_param,
+                MpvRenderParam {
+                    type_: MPV_RENDER_PARAM_INVALID,
+                    data: ptr::null_mut(),
+                },
+            ];
+            let mut render = ptr::null_mut();
+            check(mpv_render_context_create(
+                &mut render,
+                handle,
+                params.as_mut_ptr(),
+            ))?;
+
+            let update_ctx = Box::into_raw(Box::new(ctx.clone()));
+            mpv_render_context_set_update_callback(render, on_mpv_update, update_ctx.cast());
+
+            let shared = Arc::new(RenderShared {
+                render: AtomicPtr::new(render),
+                target: Mutex::new(None),
+                awaiting_frame: AtomicBool::new(false),
+                resume_after_seek: AtomicBool::new(false),
+            });
+            let paint_shared = shared.clone();
+            let callback = Arc::new(CallbackFn::new(move |info, painter| {
+                paint_video(&paint_shared, info, painter);
+            }));
+
+            Ok(Self {
+                handle,
+                render,
+                shared,
+                callback,
+                update_ctx,
+                loaded_path: None,
+                pending_seek: None,
+                last_seek: Instant::now() - Duration::from_secs(1),
+                audio_signature: None,
+            })
+        }
+    }
+
+    pub fn paint(&self, rect: Rect) -> PaintCallback {
+        PaintCallback {
+            rect,
+            callback: self.callback.clone(),
+        }
+    }
+
+    pub fn load(&mut self, path: &str) -> anyhow::Result<()> {
+        if self.loaded_path.as_deref() == Some(path) {
+            return Ok(());
+        }
+        let _ = set_property(self.handle, "pause", "yes");
+        let _ = set_property(self.handle, "lavfi-complex", "");
+        let _ = set_property(self.handle, "aid", "auto");
+        let _ = set_property(self.handle, "mute", "no");
+        let _ = set_property(self.handle, "volume", "100");
+        command(self.handle, &["loadfile", path, "replace"])?;
+        self.loaded_path = Some(path.to_string());
+        self.audio_signature = None;
+        self.pending_seek = None;
+        self.shared.awaiting_frame.store(true, Ordering::SeqCst);
+        self.request_redraw();
+        Ok(())
+    }
+
+    pub fn wants_redraw(&self) -> bool {
+        self.shared.awaiting_frame.load(Ordering::Relaxed)
+    }
+
+    fn request_redraw(&self) {
+        if !self.update_ctx.is_null() {
+            unsafe {
+                (*self.update_ctx).request_repaint();
+            }
+        }
+    }
+
+    pub fn playing(&self) -> bool {
+        !flag(self.handle, "pause").unwrap_or(true)
+    }
+
+    pub fn loaded_path(&self) -> Option<&str> {
+        self.loaded_path.as_deref()
+    }
+
+    pub fn unload(&mut self) {
+        let _ = command(self.handle, &["stop"]);
+        self.loaded_path = None;
+        self.audio_signature = None;
+        self.pending_seek = None;
+        self.shared.resume_after_seek.store(false, Ordering::Relaxed);
+        self.shared.awaiting_frame.store(false, Ordering::SeqCst);
+    }
+
+    pub fn has_video(&self) -> bool {
+        self.loaded_path.is_some() && !self.shared.awaiting_frame.load(Ordering::Relaxed)
+    }
+
+    pub fn buffering(&self) -> bool {
+        self.shared.awaiting_frame.load(Ordering::Relaxed)
+            || flag(self.handle, "paused-for-cache").unwrap_or(false)
+            || flag(self.handle, "seeking").unwrap_or(false)
+    }
+
+    pub fn play(&self) {
+        let _ = set_property(self.handle, "pause", "no");
+    }
+
+    pub fn pause(&self) {
+        self.shared.resume_after_seek.store(false, Ordering::Relaxed);
+        let _ = set_property(self.handle, "pause", "yes");
+    }
+
+    pub fn set_mute(&self, muted: bool) {
+        let _ = set_property(self.handle, "mute", if muted { "yes" } else { "no" });
+    }
+
+    pub fn muted(&self) -> bool {
+        flag(self.handle, "mute").unwrap_or(false)
+    }
+
+    pub fn time(&self) -> f64 {
+        number(self.handle, "time-pos").unwrap_or(0.0)
+    }
+
+    pub fn seek(&mut self, time: f64) {
+        self.pending_seek = Some(time.max(0.0));
+        self.request_redraw();
+    }
+
+    pub fn seek_and_play(&mut self, time: f64) {
+        self.shared.resume_after_seek.store(true, Ordering::Relaxed);
+        self.seek(time);
+        self.play();
+    }
+
+    pub fn seek_relative(&mut self, delta: f64) {
+        self.seek(self.time() + delta);
+    }
+
+    pub fn pump_events(&mut self) {
+        unsafe {
+            loop {
+                let event = mpv_wait_event(self.handle, 0.0);
+                if event.is_null() || (*event).event_id == MPV_EVENT_NONE {
+                    break;
+                }
+                if (*event).event_id == MPV_EVENT_FILE_LOADED
+                    && self.pending_seek.is_none()
+                    && self.shared.awaiting_frame.load(Ordering::Relaxed)
+                    && !self.playing()
+                    && self.time() > 0.25
+                {
+                    let _ = command(self.handle, &["seek", "0", "absolute"]);
+                }
+                self.request_redraw();
+            }
+        }
+    }
+
+    pub fn flush_seek(&mut self) {
+        let Some(time) = self.pending_seek else {
+            return;
+        };
+        if self.last_seek.elapsed() < Duration::from_millis(40) {
+            return;
+        }
+        let value = format!("{time:.6}");
+        if command(self.handle, &["seek", &value, "absolute"]).is_ok() {
+            self.pending_seek = None;
+            self.last_seek = Instant::now();
+            if self.shared.resume_after_seek.load(Ordering::Relaxed) {
+                self.play();
+            }
+            self.request_redraw();
+        }
+    }
+
+    pub fn apply_audio(&mut self, stream_indexes: &[i64]) -> anyhow::Result<()> {
+        if self.audio_signature.as_deref() == Some(stream_indexes) {
+            return Ok(());
+        }
+        let available = self.audio_tracks();
+        if available.is_empty() {
+            return Ok(());
+        }
+        let mapped = map_requested(&available, stream_indexes);
+        match mapped.as_slice() {
+            [] => {
+                set_property(self.handle, "lavfi-complex", "")?;
+                set_property(self.handle, "aid", "no")?;
+            }
+            [id] => {
+                set_property(self.handle, "lavfi-complex", "")?;
+                set_property(self.handle, "aid", &id.to_string())?;
+            }
+            ids => {
+                let inputs = ids
+                    .iter()
+                    .map(|id| format!("[aid{id}]"))
+                    .collect::<String>();
+                let graph = format!(
+                    "{inputs}amix=inputs={}:duration=longest:normalize=1[ao]",
+                    ids.len()
+                );
+                set_property(self.handle, "lavfi-complex", "")?;
+                if set_property(self.handle, "lavfi-complex", &graph).is_err() {
+                    set_property(self.handle, "aid", &ids[0].to_string())?;
+                }
+            }
+        }
+        let _ = set_property(self.handle, "mute", "no");
+        let _ = set_property(self.handle, "volume", "100");
+        self.audio_signature = Some(stream_indexes.to_vec());
+        Ok(())
+    }
+
+    pub fn clear_audio(&mut self) {
+        self.audio_signature = None;
+    }
+
+    fn audio_tracks(&self) -> Vec<(i64, i64)> {
+        let count = number(self.handle, "track-list/count").unwrap_or(0.0) as i64;
+        let mut tracks = Vec::new();
+        for index in 0..count {
+            let kind = string(self.handle, &format!("track-list/{index}/type")).unwrap_or_default();
+            if kind != "audio" {
+                continue;
+            }
+            let Some(id) = number(self.handle, &format!("track-list/{index}/id")) else {
+                continue;
+            };
+            let ff_index =
+                number(self.handle, &format!("track-list/{index}/ff-index")).unwrap_or(id) as i64;
+            tracks.push((ff_index, id as i64));
+        }
+        tracks
+    }
+}
+
+impl Drop for Player {
+    fn drop(&mut self) {
+        unsafe {
+            self.shared.render.store(ptr::null_mut(), Ordering::SeqCst);
+            if !self.render.is_null() {
+                mpv_render_context_free(self.render);
+            }
+            if !self.handle.is_null() {
+                mpv_terminate_destroy(self.handle);
+            }
+            if !self.update_ctx.is_null() {
+                drop(Box::from_raw(self.update_ctx));
+            }
+        }
+    }
+}
+
+unsafe extern "C" fn gl_get_proc_address(_ctx: *mut c_void, name: *const c_char) -> *mut c_void {
+    #[cfg(unix)]
+    {
+        let pointer = eglGetProcAddress(name);
+        if !pointer.is_null() {
+            return pointer;
+        }
+        let lib = libc::dlopen(c"libGL.so.1".as_ptr(), libc::RTLD_LAZY | libc::RTLD_GLOBAL);
+        if !lib.is_null() {
+            let symbol = libc::dlsym(lib, name);
+            if !symbol.is_null() {
+                return symbol;
+            }
+        }
+    }
+    ptr::null_mut()
+}
+
+unsafe extern "C" fn on_mpv_update(ctx: *mut c_void) {
+    if ctx.is_null() {
+        return;
+    }
+    let context = &*(ctx as *const egui::Context);
+    context.request_repaint();
+}
+
+fn paint_video(
+    shared: &RenderShared,
+    info: egui::PaintCallbackInfo,
+    painter: &eframe::egui_glow::Painter,
+) {
+    let render = shared.render.load(Ordering::SeqCst);
+    if render.is_null() {
+        return;
+    }
+    let viewport = info.viewport_in_pixels();
+    let clip = info.clip_rect_in_pixels();
+    let width = viewport.width_px.max(2);
+    let height = viewport.height_px.max(2);
+    let gl = painter.gl();
+    unsafe {
+        let window_fbo = gl.get_parameter_i32(glow::FRAMEBUFFER_BINDING);
+        let mut target = shared.target.lock().unwrap_or_else(|error| error.into_inner());
+        let recreate = target
+            .as_ref()
+            .is_none_or(|current| current.width != width || current.height != height);
+        if recreate {
+            if let Some(old) = target.take() {
+                gl.delete_framebuffer(old.fbo);
+                gl.delete_texture(old.texture);
+            }
+            let texture = gl.create_texture().expect("video texture");
+            gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+            gl.tex_image_2d(
+                glow::TEXTURE_2D,
+                0,
+                glow::RGBA8 as i32,
+                width,
+                height,
+                0,
+                glow::RGBA,
+                glow::UNSIGNED_BYTE,
+                glow::PixelUnpackData::Slice(None),
+            );
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::LINEAR as i32);
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::LINEAR as i32);
+            gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_WRAP_S,
+                glow::CLAMP_TO_EDGE as i32,
+            );
+            gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_WRAP_T,
+                glow::CLAMP_TO_EDGE as i32,
+            );
+            let fbo = gl.create_framebuffer().expect("video framebuffer");
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
+            gl.framebuffer_texture_2d(
+                glow::FRAMEBUFFER,
+                glow::COLOR_ATTACHMENT0,
+                glow::TEXTURE_2D,
+                Some(texture),
+                0,
+            );
+            *target = Some(GlTarget {
+                fbo,
+                texture,
+                width,
+                height,
+            });
+        }
+        let Some(current) = target.as_ref() else {
+            return;
+        };
+        let flags = mpv_render_context_update(render);
+        let has_frame = flags & MPV_RENDER_UPDATE_FRAME != 0;
+        gl.disable(glow::SCISSOR_TEST);
+        gl.viewport(0, 0, width, height);
+        gl.bind_framebuffer(glow::FRAMEBUFFER, Some(current.fbo));
+        if recreate {
+            gl.clear_color(0.0, 0.0, 0.0, 1.0);
+            gl.clear(glow::COLOR_BUFFER_BIT);
+        }
+        let mut fbo = MpvOpenglFbo {
+            fbo: current.fbo.0.get() as i32,
+            w: width,
+            h: height,
+            internal_format: 0,
+        };
+        let mut flip: i32 = 1;
+        let mut block: i32 = 0;
+        let mut params = [
+            MpvRenderParam {
+                type_: MPV_RENDER_PARAM_OPENGL_FBO,
+                data: (&mut fbo as *mut MpvOpenglFbo).cast(),
+            },
+            MpvRenderParam {
+                type_: MPV_RENDER_PARAM_FLIP_Y,
+                data: (&mut flip as *mut i32).cast(),
+            },
+            MpvRenderParam {
+                type_: MPV_RENDER_PARAM_BLOCK_FOR_TARGET_TIME,
+                data: (&mut block as *mut i32).cast(),
+            },
+            MpvRenderParam {
+                type_: MPV_RENDER_PARAM_INVALID,
+                data: ptr::null_mut(),
+            },
+        ];
+        if has_frame || recreate {
+            gl.disable(glow::SCISSOR_TEST);
+            gl.viewport(0, 0, width, height);
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(current.fbo));
+            let _ = mpv_render_context_render(render, params.as_mut_ptr());
+            if has_frame {
+                shared.awaiting_frame.store(false, Ordering::Relaxed);
+            }
+        }
+        let window = if window_fbo == 0 {
+            None
+        } else {
+            std::num::NonZeroU32::new(window_fbo as u32).map(glow::NativeFramebuffer)
+        };
+        gl.bind_framebuffer(glow::FRAMEBUFFER, window);
+        gl.enable(glow::SCISSOR_TEST);
+        gl.scissor(
+            clip.left_px,
+            clip.from_bottom_px,
+            clip.width_px.max(0),
+            clip.height_px.max(0),
+        );
+        gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(current.fbo));
+        gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, window);
+        gl.blit_framebuffer(
+            0,
+            0,
+            width,
+            height,
+            viewport.left_px,
+            viewport.from_bottom_px,
+            viewport.left_px + width,
+            viewport.from_bottom_px + height,
+            glow::COLOR_BUFFER_BIT,
+            glow::LINEAR,
+        );
+        gl.bind_framebuffer(glow::FRAMEBUFFER, window);
+        gl.disable(glow::SCISSOR_TEST);
+        if has_frame {
+            mpv_render_context_report_swap(render);
+        }
+    }
+}
+
+fn set_option(handle: *mut MpvHandle, name: &str, value: &str) -> anyhow::Result<()> {
+    let name = CString::new(name)?;
+    let value = CString::new(value)?;
+    unsafe { check(mpv_set_option_string(handle, name.as_ptr(), value.as_ptr())) }
+}
+
+fn set_property(handle: *mut MpvHandle, name: &str, value: &str) -> anyhow::Result<()> {
+    let name = CString::new(name)?;
+    let value = CString::new(value)?;
+    unsafe {
+        check(mpv_set_property_string(
+            handle,
+            name.as_ptr(),
+            value.as_ptr(),
+        ))
+    }
+}
+
+fn command(handle: *mut MpvHandle, args: &[&str]) -> anyhow::Result<()> {
+    let owned = args
+        .iter()
+        .map(|value| CString::new(*value))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut pointers = owned
+        .iter()
+        .map(|value| value.as_ptr())
+        .chain(std::iter::once(ptr::null()))
+        .collect::<Vec<_>>();
+    unsafe { check(mpv_command(handle, pointers.as_mut_ptr())) }
+}
+
+fn number(handle: *mut MpvHandle, name: &str) -> Option<f64> {
+    let name = CString::new(name).ok()?;
+    let mut value = 0.0_f64;
+    let status = unsafe {
+        mpv_get_property(
+            handle,
+            name.as_ptr(),
+            MPV_FORMAT_DOUBLE,
+            (&mut value as *mut f64).cast(),
+        )
+    };
+    (status >= 0).then_some(value)
+}
+
+fn flag(handle: *mut MpvHandle, name: &str) -> Option<bool> {
+    let name = CString::new(name).ok()?;
+    let mut value: i32 = 0;
+    let status = unsafe {
+        mpv_get_property(
+            handle,
+            name.as_ptr(),
+            MPV_FORMAT_FLAG,
+            (&mut value as *mut i32).cast(),
+        )
+    };
+    (status >= 0).then_some(value != 0)
+}
+
+fn string(handle: *mut MpvHandle, name: &str) -> Option<String> {
+    let name = CString::new(name).ok()?;
+    unsafe {
+        let pointer = mpv_get_property_string(handle, name.as_ptr());
+        if pointer.is_null() {
+            return None;
+        }
+        let value = CStr::from_ptr(pointer).to_string_lossy().into_owned();
+        mpv_free(pointer.cast());
+        Some(value)
+    }
+}
+
+fn map_requested(available: &[(i64, i64)], requested: &[i64]) -> Vec<i64> {
+    let mut mapped = Vec::new();
+    for (ordinal, stream_index) in requested.iter().enumerate() {
+        if let Some((_, id)) = available
+            .iter()
+            .find(|(ff_index, _)| ff_index == stream_index)
+        {
+            mapped.push(*id);
+            continue;
+        }
+        if let Some((_, id)) = available.get(ordinal) {
+            mapped.push(*id);
+        }
+    }
+    mapped.sort_unstable();
+    mapped.dedup();
+    mapped
+}
+
+fn check(status: c_int) -> anyhow::Result<()> {
+    if status >= 0 {
+        return Ok(());
+    }
+    let message = unsafe { CStr::from_ptr(mpv_error_string(status)) }
+        .to_string_lossy()
+        .into_owned();
+    anyhow::bail!("libmpv: {message}");
+}

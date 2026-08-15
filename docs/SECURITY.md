@@ -9,6 +9,9 @@
 - Server-only: the parent R2 access-key ID and secret, token pepper, and owner bootstrap
   token.
 - Device-only: the opaque device token in the OS credential vault and local recordings.
+  The desktop is a native process (egui + libmpv). There is no embedded webview, so
+  renderer CSP does not apply; cloud calls still leave the device only as HTTPS to the
+  Worker and scoped R2 uploads.
 
 ## Account authentication
 
@@ -71,4 +74,5 @@ both objects and advances the D1 time together.
    `R2_PARENT_ACCESS_KEY_ID` for suspected storage compromise.
 3. Rotate `TOKEN_PEPPER` only with a planned forced logout of every device.
 4. Delete affected clips through the app or R2, then inspect Worker audit logs/D1.
-5. Revoke the release and rotate the Tauri signing key if update signing is compromised.
+5. Revoke the GitHub Release and rotate any installer-signing certificates if a desktop
+   build is compromised.

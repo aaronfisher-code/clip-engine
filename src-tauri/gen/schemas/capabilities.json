@@ -1,1 +1,0 @@
-{"default":{"identifier":"default","description":"Permissions used by the Clip Engine desktop window","local":true,"windows":["main"],"permissions":["core:default","clipboard-manager:allow-write-text","dialog:allow-open",{"identifier":"opener:allow-open-url","allow":[{"url":"https://clips.dab.dev/*"}]},"process:allow-restart","updater:default"]}}

@@ -1,0 +1,24 @@
+[package]
+name = "clip-engine-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Local library, FFmpeg export, and Cloudflare client for Clip Engine"
+
+[dependencies]
+anyhow = "1"
+aws-credential-types = "=1.2.14"
+aws-sdk-s3 = "=1.130.0"
+base64 = "0.22"
+chrono = { version = "0.4", features = ["serde"] }
+keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
+pbkdf2 = "0.12"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+rusqlite = { version = "0.37", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tokio = { version = "1", features = ["fs", "io-util", "macros", "process", "rt-multi-thread", "sync"] }
+uuid = { version = "1", features = ["v4", "serde"] }

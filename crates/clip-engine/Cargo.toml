@@ -1,0 +1,37 @@
+[package]
+name = "clip-engine"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Local-first game clip editor and publisher"
+default-run = "clip-engine"
+
+[dependencies]
+anyhow = "1"
+arboard = "3"
+chrono = { version = "0.4", features = ["serde"] }
+clip-engine-core = { path = "../clip-engine-core" }
+eframe = { version = "0.32", default-features = false, features = ["accesskit", "default_fonts", "wayland", "x11", "glow"] }
+egui = "0.32"
+glow = "0.16"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+libc = "0.2"
+open = "5"
+raw-window-handle = "0.6"
+rfd = "0.15"
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
+
+[build-dependencies]
+pkg-config = "0.3"
+
+[package.metadata.packager]
+product-name = "Clip Engine"
+identifier = "dev.dab.clip-engine"
+category = "Video"
+out-dir = "dist/desktop"
+formats = ["appimage", "deb", "nsis"]
+icons = ["crates/clip-engine/assets/clip-engine.png"]
+resources = ["resources/binaries", "resources/THIRD_PARTY_NOTICES.md"]

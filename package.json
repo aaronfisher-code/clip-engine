@@ -5,37 +5,15 @@
   "type": "module",
   "workspaces": ["cloud", "packages/*"],
   "scripts": {
-    "dev": "vite",
-    "dev:desktop": "tauri dev",
+    "dev:desktop": "cargo run -p clip-engine",
     "dev:cloud": "npm --workspace @clip-engine/cloud run dev",
-    "build": "vite build",
-    "build:desktop": "node scripts/prepare-ffmpeg.mjs && tauri build",
+    "build:desktop": "node scripts/prepare-ffmpeg.mjs && cargo build -p clip-engine --release",
     "build:cloud": "npm --workspace @clip-engine/cloud run check",
-    "check": "tsc -p tsconfig.web.json --noEmit && npm --workspace @clip-engine/contracts run check && npm --workspace @clip-engine/cloud run check",
-    "check:rust": "cargo check --manifest-path src-tauri/Cargo.toml",
-    "test": "npm --workspace @clip-engine/cloud test",
-    "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml",
-    "format:rust": "cargo fmt --manifest-path src-tauri/Cargo.toml -- --check",
-    "tauri": "tauri"
-  },
-  "dependencies": {
-    "@clip-engine/contracts": "1.0.0",
-    "@tauri-apps/api": "^2.8.0",
-    "@tauri-apps/plugin-dialog": "^2.4.0",
-    "@tauri-apps/plugin-clipboard-manager": "^2.3.0",
-    "@tauri-apps/plugin-opener": "^2.5.0",
-    "@tauri-apps/plugin-process": "^2.3.0",
-    "@tauri-apps/plugin-updater": "^2.9.0",
-    "react": "^19.1.1",
-    "react-dom": "^19.1.1"
-  },
-  "devDependencies": {
-    "@tauri-apps/cli": "^2.8.0",
-    "@types/node": "^24.2.1",
-    "@types/react": "^19.1.10",
-    "@types/react-dom": "^19.1.7",
-    "@vitejs/plugin-react": "^4.7.0",
-    "typescript": "^5.9.2",
-    "vite": "^7.1.2"
+    "check": "npm --workspace @clip-engine/contracts run check && npm --workspace @clip-engine/cloud run check && cargo check --workspace",
+    "check:rust": "cargo check --workspace",
+    "test": "npm --workspace @clip-engine/cloud test && cargo test --workspace",
+    "test:rust": "cargo test --workspace",
+    "format:rust": "cargo fmt --all -- --check",
+    "package:desktop": "node scripts/prepare-ffmpeg.mjs && cargo packager -p clip-engine --release"
   }
 }

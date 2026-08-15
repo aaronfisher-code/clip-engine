@@ -4,7 +4,7 @@ Clip Engine is a local-first Windows and Linux desktop app for trimming recordin
 mixing audio tracks, transcoding with the local GPU or CPU, and publishing public
 30-day clip links. Publishing requires owner approval and can be revoked at any time.
 
-The desktop application is Tauri 2 + React + Rust. It stores its library in a local
+The desktop application is Rust + egui + libmpv. It stores its library in a local
 SQLite database and keeps account credentials in the operating-system credential
 vault. The cloud control plane is a Cloudflare Worker backed by D1 and R2. Parent R2
 credentials never enter the app: the Worker issues one-hour credentials restricted to
@@ -14,7 +14,8 @@ the exact video and thumbnail keys created for one upload.
 
 ```text
 Windows / Linux desktop
-  React UI → Tauri commands → SQLite + FFmpeg/FFprobe
+  egui UI → Rust engine → SQLite + FFmpeg/FFprobe
+                         ├─ libmpv original-file playback
                          ├─ authenticated API → Cloudflare Worker → D1
                          └─ scoped multipart upload ──────────────→ R2
 
@@ -32,11 +33,10 @@ leaves the machine.
 ## What is implemented
 
 - Native Windows NSIS and Linux AppImage/deb installers.
-- Signed automatic updates from GitHub Releases.
 - Native multi-file picker and an OBS inbox under the user's Videos directory.
-- FFprobe metadata, instant original-file playback, LosslessCut-style coalesced seeking,
-  FFmpeg-assisted fallback for incompatible codecs, frame-aware trimming, and
-  audio-track mix.
+- FFprobe metadata, original-file libmpv playback at source frame rate (including 120 fps),
+  hardware decode when the GPU allows it, frame-accurate trimming, and audio-track mix
+  without re-encoding video.
 - Runtime detection of NVENC, Intel QSV, AMD AMF, with libx264 fallback.
 - Local 1080p output up to 120 fps and direct multipart R2 upload.
 - Local SQLite library plus a shared cloud library for all approved members.
@@ -47,45 +47,35 @@ leaves the machine.
 
 ## Local development
 
-Install Node.js 24, Rust 1.93, Tauri's platform prerequisites, and FFmpeg/FFprobe on
-`PATH`. Then run:
+Install Node.js 24, Rust 1.93, FFmpeg/FFprobe, and libmpv (plus headers) on the
+development machine. Then run:
 
 ```bash
 npm install
 npm run dev:desktop
 ```
 
-On NVIDIA Wayland sessions the app automatically disables WebKitGTK's problematic
-DMA-BUF renderer before creating the window. This avoids the upstream `Gdk Error 71`
-startup crash without changing FFmpeg GPU transcoding.
+On Linux install `libmpv-dev` (and a working `ffmpeg` on `PATH`). On Windows set
+`MPV_LIB_DIR` to a libmpv import-library directory if pkg-config is unavailable.
 
-Playback follows the same broad strategy as LosslessCut: use the original file directly
-when the platform decoder supports it and avoid an up-front transcode. Rapid timeline
-drags are coalesced so only the newest seek is decoded, without pausing playback. If the
-native webview genuinely cannot decode a source, the app seeks FFmpeg to the requested
-position and streams a full-resolution, source-frame-rate, all-intra fragmented MP4 over
-a random, tokenized loopback URL. A paused scrub decodes one display frame and then
-closes the stream; continuous transcoding happens only while playback is running. The
-same fallback is available on Windows and Linux, but it is never selected merely because
-of a filename or codec heuristic, and a user-selected Original backend remains selected.
+Playback uses libmpv on the original recording: `hwdec=auto-safe`, `hr-seek=yes`,
+coalesced timeline seeks, `aid=` for one selected track, and `lavfi-complex` amix
+when several tracks are enabled. Video is not transcoded for preview. Thumbnails are
+lazy JPEGs. Publishing still transcodes locally to 1080p/120.
 
-The loopback server binds only to `127.0.0.1`, validates clip IDs through SQLite, and
-serves standards-compliant byte ranges. No source clip is uploaded or exposed on the
-LAN. Playback shortcuts are Space, Left/Right, Shift+Left/Right, and I/O.
+Playback shortcuts are Space, Left/Right, Shift+Left/Right, and I/O.
 
 Useful checks:
 
 ```bash
 npm run check
 npm test
-npm run build
-npm run check:rust
-npm run test:rust
 ```
 
-`npm run build:desktop` copies FFmpeg and FFprobe from `PATH` and creates the native
-bundle. Official releases instead download static x86-64 builds in CI so friends do
-not need to install FFmpeg separately.
+`npm run build:desktop` copies FFmpeg and FFprobe from `PATH` and builds a release
+binary. Official releases download static x86-64 FFmpeg builds in CI and package
+Windows/Linux installers with cargo-packager so friends do not need to install FFmpeg
+separately. libmpv is bundled with those installers.
 
 ## Production setup, step by step
 
@@ -207,44 +197,23 @@ comfortably inside the free control-plane allowances. R2 storage and operation u
 still depends on how many gigabytes of clips the group publishes during each 30-day
 window.
 
-### 7. Configure signed releases and live updates
+### 7. Publish desktop installers
 
-Generate a Tauri updater keypair on a trusted machine:
-
-```bash
-npm run tauri -- signer generate --write-keys ~/.tauri/clip-engine.key
-```
-
-Add these GitHub repository secrets:
-
-- `TAURI_SIGNING_PRIVATE_KEY`: contents of the private key.
-- `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`: its password.
-- `TAURI_UPDATER_PUBLIC_KEY`: the generated public key.
-
-Keep the private key backed up and offline; losing it prevents existing installations
-from accepting future updates. Never commit it. The public key is injected into each
-release build through `TAURI_CONFIG`.
-
-Bump the version in both `package.json` and `src-tauri/tauri.conf.json`, then push a
-version tag:
+Bump the version in `package.json` and `Cargo.toml`, then push a version tag:
 
 ```bash
 git tag v1.0.1
 git push origin v1.0.1
 ```
 
-The **Desktop release** workflow builds signed-update artifacts and Windows/Linux
-installers, then creates a draft GitHub Release. Test both installers and publish the
-draft. Every running app checks the release feed shortly after launch; an available
-version appears as a one-click update button and restarts after installation.
-GitHub Releases must remain publicly downloadable for this configured update endpoint;
-if the repository is private, mirror `latest.json`, installers, and signatures to a
-public HTTPS origin and change the updater endpoint before the first release.
+The **Desktop release** workflow builds Windows NSIS and Linux AppImage/deb packages
+with bundled FFmpeg and libmpv, then creates a draft GitHub Release. Test both
+installers and publish the draft. There is no in-app auto-updater yet; friends install
+the new package from the release.
 
-Windows Authenticode signing is separate from Tauri update signing. Add certificate
-configuration before broad distribution if you want to avoid SmartScreen reputation
-warnings. Linux package signing can likewise be added for an apt repository, but the
-signed Tauri updater already authenticates application updates.
+Windows Authenticode signing can be added before broad distribution if you want to
+avoid SmartScreen reputation warnings. Linux package signing can likewise be added for
+an apt repository.
 
 ## Storage and deletion behavior
 
@@ -270,9 +239,8 @@ used for encrypted backups of the repository, signing key, and optional source c
 - Apply `cloud/lifecycle.json` and confirm it with `wrangler r2 bucket lifecycle list`.
 - Store Worker and GitHub secrets only in their respective secret stores.
 - Test owner sign-in, account approval, password reset, revocation, multipart upload, expiry, and
-  one signed update using a staging account first.
+  a desktop installer using a staging account first.
 - Enable GitHub branch protection and dependency/security update automation.
-- Keep the Tauri signing private key in at least two encrypted offline backups.
 
 ## Security notes
 
