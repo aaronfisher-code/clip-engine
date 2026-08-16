@@ -6,6 +6,7 @@ data/
 .env
 .dev.vars
 cloud/.dev.vars
+cloud/.wrangler/
 *.log
 resources/binaries/ffmpeg
 resources/binaries/ffprobe
