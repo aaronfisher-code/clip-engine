@@ -1,278 +1,113 @@
-# Dabs Clip Engine
+<p align="center">
+  <img src="docs/brand/banner.svg" width="900" alt="Dabs Clip Engine — trim, mix, and share 30-day clip links">
+</p>
 
-Dabs Clip Engine is a local-first Windows and Linux desktop app for trimming recordings,
-mixing audio tracks, transcoding with the local GPU or CPU, and publishing public
-30-day clip links. Publishing requires owner approval and can be revoked at any time.
+<h1 align="center">Dabs Clip Engine</h1>
 
-The desktop application is Rust + egui + libmpv. It stores its library in a local
-SQLite database and keeps account credentials in the operating-system credential
-vault. The cloud control plane is a Cloudflare Worker backed by D1 and R2. Parent R2
-credentials never enter the app: the Worker issues one-hour credentials restricted to
-the exact video and thumbnail keys created for one upload.
+<p align="center">
+  <strong>Trim the take. Mix the audio. Send a 30-day clip link.</strong>
+</p>
 
-## Architecture
+<p align="center">
+  A native Windows and Linux app for turning long recordings into tight, shareable clips — without giving the cloud your originals.
+</p>
+
+<p align="center">
+  <a href="https://github.com/aaronfisher-code/clip-engine/releases/latest"><img src="https://img.shields.io/github/v/release/aaronfisher-code/clip-engine?style=for-the-badge&label=Latest%20release&labelColor=101116&color=c7ff3d" alt="Latest release"></a>
+  <a href="https://github.com/aaronfisher-code/clip-engine/releases/latest"><img src="https://img.shields.io/badge/Windows-NSIS%20installer-c7ff3d?style=for-the-badge&labelColor=101116" alt="Windows"></a>
+  <a href="https://github.com/aaronfisher-code/clip-engine/releases/latest"><img src="https://img.shields.io/badge/Linux-AppImage%20%2B%20deb-c7ff3d?style=for-the-badge&labelColor=101116" alt="Linux"></a>
+</p>
+
+<p align="center">
+  <a href="https://github.com/aaronfisher-code/clip-engine/releases/latest"><strong>Download the latest build</strong></a>
+</p>
+
+---
+
+## Get the app
+
+Open the **[latest GitHub Release](https://github.com/aaronfisher-code/clip-engine/releases/latest)** and download the file for your computer. You do not need to install FFmpeg or other developer tools — those come with the app.
+
+| If you use | Download this |
+| --- | --- |
+| **Windows** | The file ending in `_x64-setup.exe` |
+| **Linux (easiest)** | The `.AppImage` — make it executable, then double-click it |
+| **Debian / Ubuntu** | The `.deb` package |
+
+After you install once, the app can update itself. On launch it checks GitHub for a newer release, and you can also choose **Check for updates** anytime.
+
+Windows may show a SmartScreen warning the first time because the installer is not yet widely signed. Choose **More info**, then **Run anyway**. Linux AppImages need execute permission once (`chmod +x` on the file, or your file manager’s “Allow executing” option).
+
+---
+
+## What it is for
+
+Clip Engine is for people who already record — games, streams, sessions — and want a fast path from a long file to a public link.
+
+Work stays on your machine. You import recordings, play them at the original frame rate (including 120 fps), mark in/out points, pick which audio tracks to keep, and export a 1080p clip. Publishing uploads only that finished clip, not the source file. Recipients open a normal web page; they never need this app.
 
 ```text
-Windows / Linux desktop
-  egui UI → Rust engine → SQLite + FFmpeg/FFprobe
-                         ├─ libmpv original-file playback
-                         ├─ authenticated API → Cloudflare Worker → D1
-                         └─ scoped multipart upload ──────────────→ R2
-
-Public viewer → clips.dab.dev/c/<slug> → Worker share page
-                                      → media.clips.dab.dev/published/... → R2
+Record  →  trim & mix locally  →  publish 1080p  →  send the link
 ```
 
-Public viewing is intentional. Creating uploads, listing the team library, extending
-retention, approving users, and revoking users all require an active device token.
-Anyone can request an account, but only owner approval creates a publishing account.
-No email address or other personal information is collected. The desktop derives a
-high-entropy credential from the password locally, so a member's human password never
-leaves the machine.
+---
 
-## What is implemented
+## Features
 
-- Native Windows NSIS and Linux AppImage/deb installers.
-- Native multi-file picker and an OBS inbox under the user's Videos directory.
-- FFprobe metadata, original-file libmpv playback at source frame rate (including 120 fps),
-  hardware decode when the GPU allows it, frame-accurate trimming, and audio-track mix
-  without re-encoding video.
-- Runtime detection of NVENC, Intel QSV, AMD AMF, with libx264 fallback.
-- Local 1080p output up to 120 fps and direct multipart R2 upload.
-- Local SQLite library plus a shared cloud library for all approved members.
-- Owner approval, password-reset, and member revocation controls.
-- Public Open Graph clip pages with separate video and thumbnail assets.
-- Exact 30-day application expiry plus an R2 lifecycle backstop.
-- Non-destructive import of the old `data/clip-engine.json` library on first launch.
+**Cut on the original file.** Preview uses the recording you already have. Seeking is frame-accurate, hardware decode is used when the GPU allows it, and video is not re-encoded just to watch it.
 
-## Local development
+**Mix audio without cooking the picture.** Enable one track or several. The mix happens in the player; video stays untouched until you export.
 
-Install Node.js 24, Rust 1.93, FFmpeg/FFprobe, and libmpv (plus headers) on the
-development machine. Then run:
+**GPU encode when you have it.** NVIDIA NVENC, Intel Quick Sync, and AMD AMF are detected at runtime, with a CPU fallback if needed. Output is 1080p, up to 120 fps.
 
-```bash
-npm install
-npm run dev:desktop
-```
+**OBS-aware import.** Grab files with the system picker, or drop them from an inbox under your Videos folder.
 
-On Linux install `libmpv-dev` (and a working `ffmpeg` on `PATH`). On Windows set
-`MPV_LIB_DIR` to a libmpv import-library directory if pkg-config is unavailable.
+**A library that stays yours.** Clips live in a local library on your PC. Approved teammates also see a shared cloud library of what the group has published.
 
-Playback uses libmpv on the original recording: `hwdec=auto-safe`, `hr-seek=yes`,
-coalesced timeline seeks, `aid=` for one selected track, and `lavfi-complex` amix
-when several tracks are enabled. Video is not transcoded for preview. Thumbnails are
-lazy JPEGs. Publishing still transcodes locally to 1080p/120.
+**Links that expire.** Published clips get a public page with a preview image, then disappear after 30 days. You can extend a clip or revoke access when you need to.
 
-Playback shortcuts are Space, Left/Right, Shift+Left/Right, and I/O.
+---
 
-Useful checks:
+## Sharing a clip
 
-```bash
-npm run check
-npm test
-```
+Anyone with the link can watch. The page looks like a finished product — title, duration, quality, who uploaded it — and works in Discord, browsers, and anywhere Open Graph previews show up.
 
-`npm run build:desktop` copies FFmpeg and FFprobe from `PATH` and builds a release
-binary. Official releases download static x86-64 FFmpeg builds in CI and package
-Windows/Linux installers with cargo-packager so friends do not need to install FFmpeg
-separately. libmpv is bundled with those installers.
+- Each published clip gets its own public page — no account needed to watch
+- Links last **30 days** from publish (or from the last time you extend them)
+- Deleting a published version removes the online video and thumbnail
+- Your original recording is never deleted by Clip Engine
 
-## Production setup, step by step
+---
 
-### 1. Create Cloudflare resources
+## Accounts, without the usual hassle
 
-Install dependencies and authenticate Wrangler:
+Publishing is for people the owner has approved. Watching a shared link does not require an account.
 
-```bash
-npm install
-npx wrangler login
-npx wrangler r2 bucket create clip-engine-media-prod
-npx wrangler d1 create clip-engine-prod
-```
+1. Install the app and choose **Create account**.
+2. Pick a username, a display name, and a password. No email is collected.
+3. Request access and wait — the owner reviews the queue under **Manage access**.
+4. Once approved, sign in. You stay signed in across restarts until you sign out or the owner revokes you.
 
-Put the returned D1 ID and your Cloudflare account ID into
-[`cloud/wrangler.jsonc`](cloud/wrangler.jsonc). The config expects these domains:
+Forgot a password? The owner can issue a one-day reset from **Manage access → Active**. You never have to send a human password over the internet: the app derives a credential on your device, and the server only ever sees that.
 
-- `api.clips.dab.dev` and `clips.dab.dev` route to the Worker.
-- `media.clips.dab.dev` is the public custom domain for the R2 bucket.
+---
 
-Attach `media.clips.dab.dev` to the bucket in **R2 → bucket → Settings → Custom
-Domains**. Wrangler creates the two Worker custom domains during deployment.
+## What stays on your computer
 
-### 2. Create the least-privilege R2 parent token
+| | |
+| --- | --- |
+| Original recordings | Left where you saved them. Clip Engine does not delete them. |
+| Local library | Windows: `%LOCALAPPDATA%\dev.dab.clip-engine`<br>Linux: `~/.local/share/dev.dab.clip-engine` |
+| Sign-in | Stored in Windows Credential Manager or the Linux keyring — not in a random file on disk |
+| Cloud upload | Only the published 1080p clip and its thumbnail, with short-lived credentials scoped to those two files |
 
-In **Storage & databases → R2 → Overview → Manage API Tokens**, create an R2 Object
-Read & Write API token restricted to `clip-engine-media-prod`. Record its Access Key ID
-and Secret Access Key when Cloudflare displays them.
+---
 
-The Worker uses those server-only values to locally sign short-lived credentials scoped
-to two generated keys. This avoids a Cloudflare control-plane request for every upload.
-A desktop never receives a bucket-wide or permanent credential.
+## For developers and operators
 
-### 3. Configure secrets
+Building from source, deploying the Cloudflare Worker, or shipping installers is documented separately so this page can stay about using the product.
 
-Generate two independent random values, for example:
+- **[Setup guide](docs/SETUP.md)** — local development, production cloud, owner onboarding, and release publishing
+- **[Security model](docs/SECURITY.md)** — trust boundaries, credentials, and revocation
 
-```bash
-openssl rand -base64 48
-openssl rand -base64 48
-```
-
-Set the Worker secrets; do not put them in `wrangler.jsonc` or Git:
-
-```bash
-cd cloud
-npx wrangler secret put BOOTSTRAP_TOKEN
-npx wrangler secret put TOKEN_PEPPER
-npx wrangler secret put R2_PARENT_SECRET_ACCESS_KEY
-cd ..
-```
-
-Set `R2_PARENT_ACCESS_KEY_ID` in `cloud/wrangler.jsonc` to the Access Key ID from that
-same R2 token. `R2_PARENT_SECRET_ACCESS_KEY` and `R2_PARENT_ACCESS_KEY_ID` must therefore
-be the secret/ID pair created together. Keep the bootstrap token in an encrypted
-password manager. It is the `admin` account's initial and recovery password. The
-expected local-development secret names are also shown in
-[`cloud/.dev.vars.example`](cloud/.dev.vars.example).
-
-### 4. Apply the schema and lifecycle policy
-
-```bash
-npm --workspace @clip-engine/cloud exec -- wrangler d1 migrations apply clip-engine-prod --remote
-npm --workspace @clip-engine/cloud exec -- wrangler r2 bucket lifecycle set clip-engine-media-prod --file lifecycle.json
-```
-
-Run the lifecycle command from the `cloud/` directory, or use `--file
-cloud/lifecycle.json` from the repository root. The lifecycle deletes objects beneath
-`published/` 30 days after their most recent write and aborts unfinished multipart
-uploads after one day. The Worker independently stops serving a link at its exact D1
-expiry; R2 physical deletion can follow within roughly 24 hours.
-
-### 5. Deploy and verify the Worker
-
-```bash
-npm --workspace @clip-engine/cloud exec -- wrangler deploy
-curl https://api.clips.dab.dev/health
-```
-
-The repository also contains a manually triggered **Cloud deployment** GitHub Actions
-workflow. Add `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` as repository secrets
-before using it.
-
-### 6. Sign in as the owner and approve members
-
-Launch a development build or installer, choose **Sign in**, and use `admin` as the
-username and the `BOOTSTRAP_TOKEN` value as the password. On first sign-in this creates
-the owner account; the same login also recovers or migrates an existing owner account.
-Afterward the desktop keeps the owner signed in in the same way as every other user.
-
-Normal sign-in needs only the username and password. The resulting random device token
-is stored in Windows Credential Manager or the Linux Secret Service keyring, while D1
-stores only a peppered SHA-256 hash. This keeps the user signed in across restarts and
-application updates. Signing out revokes only that device server-side before removing
-the local credential.
-
-On a friend's first launch, **Create account** asks only for a username, display name,
-and password. **Request access** places the account in the owner's review queue and
-saves a status token in the operating-system credential vault. The waiting screen tells
-them that the owner will notify them; they can use **Check status** after you do.
-
-Open **Manage access → Pending** to filter, approve, or decline requests. Approval
-creates a durable member account. Tell the member they can now sign in; they remain
-signed in until they explicitly sign out or you revoke them. Restoring a revoked
-account does not reactivate old device sessions.
-
-If a member forgets their password, open **Manage access → Active**, choose **Reset
-password**, and send them the generated one-day token or link privately. They choose
-**Sign in → Forgot my password**, enter their username and that token, and can select a
-new password only after the Worker validates both. Redeeming it signs them in and
-revokes their older device sessions.
-
-PBKDF2-HMAC-SHA256 with 600,000 iterations runs asynchronously on the desktop. The
-Worker performs only a peppered SHA-256 verification of that derived credential, keeping
-routine authentication beneath the Workers Free CPU ceiling. Successful account
-requests are capped at five per source IP per day, and waiting clients check status only
-when asked, limiting idle Worker and D1 usage. For a small private group this should fit
-comfortably inside the free control-plane allowances. R2 storage and operation usage
-still depends on how many gigabytes of clips the group publishes during each 30-day
-window.
-
-### 7. Publish desktop installers
-
-The `release` branch is the automatic publisher. Every push to it patch-bumps the
-desktop version, builds Windows NSIS and Linux AppImage/deb packages with bundled
-FFmpeg and libmpv, then **publishes** a GitHub Release. Friends on a build that
-includes the in-app updater are offered that release after the workflow finishes.
-
-Create the branch once from the commit you want to ship:
-
-```bash
-git checkout rust-rewrite
-git checkout -b release
-git push -u origin release
-```
-
-Later, merge or cherry-pick onto `release` and push:
-
-```bash
-git checkout release
-git merge rust-rewrite
-git push
-```
-
-Put `[minor]` or `[major]` in the commit message to bump those instead of patch.
-The workflow writes a `chore(release): vX.Y.Z` commit and tag after both
-installers succeed, so a failed build does not consume a version number.
-
-To ship a **draft** for testing without publishing, push a version tag from any
-branch (after bumping `package.json` and `Cargo.toml` yourself):
-
-```bash
-git tag v1.0.1
-git push origin v1.0.1
-```
-
-The desktop checks
-`https://api.github.com/repos/aaronfisher-code/clip-engine/releases/latest`
-on launch (and when **Check for updates** is used). Drafts and pre-releases are
-ignored. Windows installs the new NSIS package silently for the current user;
-Linux prefers the AppImage (replacing the running AppImage when `APPIMAGE` is set)
-and otherwise opens the downloaded package. There is no extra update server:
-the installer files already attached to the GitHub Release are the update payload.
-
-Windows Authenticode signing can be added before broad distribution if you want to
-avoid SmartScreen reputation warnings. Linux package signing can likewise be added for
-an apt repository. Auto-update itself verifies the download over HTTPS from GitHub;
-it does not yet verify a separate packager signature.
-
-## Storage and deletion behavior
-
-Local originals are never deleted by Clip Engine. Removing a local clip deletes only
-its preview, exports, and SQLite history. Deleting a published version deletes its R2
-video and thumbnail plus the local export. Extending a clip rewrites its two R2 objects
-and advances its D1 expiry by another 30 days.
-
-Desktop data is stored in the platform application-data directory:
-
-- Windows: `%LOCALAPPDATA%\\dev.dab.clip-engine`
-- Linux: `$XDG_DATA_HOME/dev.dab.clip-engine` or `~/.local/share/dev.dab.clip-engine`
-
-The SQLite database is the only irreplaceable local app file. Originals remain wherever
-the user recorded them. The cloud data plane is small enough that Workers, D1, and R2
-are normally simpler and cheaper than exposing a home server; the home server is better
-used for encrypted backups of the repository, signing key, and optional source clips.
-
-## Production checklist
-
-- Replace every `replace-with-*` value in `cloud/wrangler.jsonc`.
-- Verify all three custom domains and HTTPS before distributing installers.
-- Apply `cloud/lifecycle.json` and confirm it with `wrangler r2 bucket lifecycle list`.
-- Store Worker and GitHub secrets only in their respective secret stores.
-- Test owner sign-in, account approval, password reset, revocation, multipart upload, expiry, and
-  a desktop installer using a staging account first.
-- Enable GitHub branch protection and dependency/security update automation.
-
-## Security notes
-
-See [`docs/SECURITY.md`](docs/SECURITY.md) for the trust boundaries, credential model,
-revocation behavior, and an operational incident checklist.
+The desktop is a native Rust app. Official installers are built in CI and attached to GitHub Releases; that is also how in-app updates are delivered.
