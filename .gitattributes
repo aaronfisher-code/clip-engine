@@ -1,2 +1,4 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+Cargo.lock text eol=lf
+Cargo.toml text eol=lf

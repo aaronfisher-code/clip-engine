@@ -44,6 +44,10 @@ function bumpVersion(current, bump) {
   return `${current.major}.${current.minor}.${current.patch + 1}`;
 }
 
+function newlineOf(text) {
+  return text.includes("\r\n") ? "\r\n" : "\n";
+}
+
 function cargoWorkspaceVersion() {
   const text = readFileSync(CARGO_TOML, "utf8");
   const match = text.match(
@@ -55,14 +59,24 @@ function cargoWorkspaceVersion() {
   return match[1];
 }
 
-function replaceLockPackageVersion(text, name, version) {
-  const pattern = new RegExp(
-    `(\\[\\[package\\]\\]\\nname = "${name}"\\nversion = ")[^"]+(")`,
-  );
-  if (!pattern.test(text)) {
-    throw new Error(`Could not update ${name} in Cargo.lock`);
+export function replaceLockPackageVersion(text, name, version) {
+  const newline = newlineOf(text);
+  const lines = text.split(/\r?\n/);
+  for (let index = 0; index < lines.length - 2; index += 1) {
+    if (
+      lines[index] === "[[package]]" &&
+      lines[index + 1] === `name = "${name}"` &&
+      /^version = "/.test(lines[index + 2])
+    ) {
+      lines[index + 2] = `version = "${version}"`;
+      let updated = lines.join(newline);
+      if (text.endsWith("\n") && !updated.endsWith(newline)) {
+        updated += newline;
+      }
+      return updated;
+    }
   }
-  return text.replace(pattern, `$1${version}$2`);
+  throw new Error(`Could not update ${name} in Cargo.lock`);
 }
 
 function writeJson(path, mutate) {

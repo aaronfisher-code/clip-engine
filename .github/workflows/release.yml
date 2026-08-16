@@ -97,6 +97,8 @@ jobs:
             archive: ffmpeg-master-latest-win64-gpl.zip
     runs-on: ${{ matrix.platform }}
     steps:
+      - name: Keep LF line endings
+        run: git config --global core.autocrlf false
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
