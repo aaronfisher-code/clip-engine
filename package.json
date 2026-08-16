@@ -1,9 +1,12 @@
 {
   "name": "clip-engine",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "type": "module",
-  "workspaces": ["cloud", "packages/*"],
+  "workspaces": [
+    "cloud",
+    "packages/*"
+  ],
   "scripts": {
     "dev:desktop": "cargo run -p clip-engine",
     "dev:cloud": "npm --workspace @clip-engine/cloud run dev",
