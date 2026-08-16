@@ -154,6 +154,30 @@ pub fn inset() -> Frame {
         .inner_margin(Margin::symmetric(10, 8))
 }
 
+pub fn version_chip(ui: &mut Ui, count: usize) -> egui::Response {
+    let label = format!("×{count}");
+    Frame::NONE
+        .fill(Color32::from_rgba_unmultiplied(232, 176, 74, 22))
+        .stroke(Stroke::new(1.0, ACCENT.gamma_multiply(0.4)))
+        .corner_radius(8)
+        .inner_margin(Margin::symmetric(5, 1))
+        .show(ui, |ui| {
+            ui.spacing_mut().item_spacing = Vec2::ZERO;
+            ui.label(
+                egui::RichText::new(label)
+                    .size(10.0)
+                    .color(ACCENT)
+                    .family(medium()),
+            );
+        })
+        .response
+        .on_hover_text(if count == 1 {
+            "1 published version".into()
+        } else {
+            format!("{count} published versions")
+        })
+}
+
 pub fn progress_bar(ui: &mut Ui, progress: f32) {
     let height = 10.0;
     let (rect, _) = ui.allocate_exact_size(
@@ -243,6 +267,99 @@ pub fn buffering_overlay(ui: &Ui, rect: Rect) {
         MUTED,
     );
     ui.ctx().request_repaint();
+}
+
+pub fn library_menu_button(ui: &mut Ui, open: bool) -> egui::Response {
+    let size = Vec2::splat(32.0);
+    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+    let hovered = response.hovered();
+    let active = response.is_pointer_button_down_on();
+    let hover_t = ui
+        .ctx()
+        .animate_bool_with_time(response.id.with("hover"), hovered, 0.14);
+
+    let radius = CornerRadius::same(8);
+    let bg = if active {
+        Color32::from_rgb(36, 40, 50)
+    } else if hovered {
+        CARD_HOVER
+    } else {
+        CARD
+    };
+    let stroke = if hovered || active || open {
+        ACCENT.gamma_multiply(0.7)
+    } else {
+        LINE
+    };
+    ui.painter().rect_filled(rect, radius, bg);
+    ui.painter().rect_stroke(
+        rect,
+        radius,
+        Stroke::new(1.0, stroke),
+        egui::StrokeKind::Inside,
+    );
+
+    let mut center = rect.center();
+    if hover_t > 0.0 {
+        if let Some(pointer) = ui.ctx().pointer_latest_pos() {
+            let raw = (pointer - center) / 42.0;
+            center += Vec2::new(raw.x.clamp(-1.0, 1.0), raw.y.clamp(-1.0, 1.0)) * (2.8 * hover_t);
+        }
+        ui.ctx().request_repaint();
+    }
+
+    let color = if hovered || open { ACCENT } else { TEXT };
+    let length = 14.0 + hover_t * 1.4;
+    let thickness = 2.15;
+    let gap = 5.0 + hover_t * 0.6;
+
+    paint_menu_bar(
+        ui.painter(),
+        center + Vec2::new(0.0, -gap),
+        length,
+        thickness,
+        0.0,
+        color,
+    );
+    paint_menu_bar(
+        ui.painter(),
+        center,
+        length,
+        thickness,
+        0.0,
+        color,
+    );
+    paint_menu_bar(
+        ui.painter(),
+        center + Vec2::new(0.0, gap),
+        length,
+        thickness,
+        0.0,
+        color,
+    );
+
+    response
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text(if open { "Hide library" } else { "Show library" })
+}
+
+fn paint_menu_bar(
+    painter: &egui::Painter,
+    center: Pos2,
+    length: f32,
+    thickness: f32,
+    angle: f32,
+    color: Color32,
+) {
+    if length <= 0.5 || color.a() == 0 {
+        return;
+    }
+    let half = Vec2::angled(angle) * (length * 0.5);
+    let start = center - half;
+    let end = center + half;
+    painter.line_segment([start, end], Stroke::new(thickness, color));
+    painter.circle_filled(start, thickness * 0.5, color);
+    painter.circle_filled(end, thickness * 0.5, color);
 }
 
 pub fn transport_icon_button(

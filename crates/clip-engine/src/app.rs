@@ -15,12 +15,6 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum LibraryArea {
-    Inbox,
-    Published,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
 enum AuthMode {
     Request,
     Login,
@@ -84,7 +78,6 @@ pub struct ClipApp {
     jobs: Vec<PublishJob>,
     cloud_clips: Vec<CloudClip>,
     selected_id: Option<String>,
-    library_area: LibraryArea,
     library_open: bool,
     user: Option<CloudUser>,
     access_request: Option<AccessRequest>,
@@ -170,7 +163,6 @@ impl ClipApp {
                     jobs,
                     cloud_clips: Vec::new(),
                     selected_id,
-                    library_area: LibraryArea::Inbox,
                     library_open: true,
                     user: None,
                     access_request: None,
@@ -213,7 +205,6 @@ impl ClipApp {
             jobs,
             cloud_clips: Vec::new(),
             selected_id,
-            library_area: LibraryArea::Inbox,
             library_open: true,
             user: None,
             access_request: None,
@@ -445,47 +436,23 @@ impl ClipApp {
         });
     }
 
-    fn published_map(&self) -> HashMap<String, PublishJob> {
-        let mut map = HashMap::new();
-        for job in &self.jobs {
-            if job.status == "complete" && job.url.is_some() && !map.contains_key(&job.clip_id) {
-                map.insert(job.clip_id.clone(), job.clone());
-            }
-        }
-        map
-    }
-
     fn inbox_clips(&self) -> Vec<&Clip> {
-        let published = self.published_map();
         let inbox = PathBuf::from(&self.config.source_directory);
         let default_inbox = default_inbox_dir().ok();
         self.clips
             .iter()
             .filter(|clip| {
-                !published.contains_key(&clip.id)
-                    && clip_belongs_in_inbox(
-                        Path::new(&clip.source_path),
-                        &inbox,
-                        default_inbox.as_deref(),
-                    )
+                clip_belongs_in_inbox(
+                    Path::new(&clip.source_path),
+                    &inbox,
+                    default_inbox.as_deref(),
+                )
             })
             .collect()
     }
 
-    fn published_clips(&self) -> Vec<&Clip> {
-        let published = self.published_map();
-        self.clips
-            .iter()
-            .filter(|clip| published.contains_key(&clip.id))
-            .collect()
-    }
-
     fn visible_clips(&self) -> Vec<&Clip> {
-        if self.library_area == LibraryArea::Published {
-            self.published_clips()
-        } else {
-            self.inbox_clips()
-        }
+        self.inbox_clips()
     }
 
     fn ensure_valid_selection(&mut self) {
@@ -539,15 +506,7 @@ impl eframe::App for ClipApp {
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     ui.set_height(36.0);
-                    let library_label = if self.library_open {
-                        "Hide library"
-                    } else {
-                        "Show library"
-                    };
-                    if ui
-                        .selectable_label(self.library_open, library_label)
-                        .clicked()
-                    {
+                    if theme::library_menu_button(ui, self.library_open).clicked() {
                         self.library_open = !self.library_open;
                     }
                     ui.add_space(8.0);
@@ -639,11 +598,7 @@ impl eframe::App for ClipApp {
                 if let Some(clip_id) = self.selected_id.clone() {
                     if let Some(index) = self.clips.iter().position(|clip| clip.id == clip_id) {
                         let clip = self.clips[index].clone();
-                        if self.library_area == LibraryArea::Published {
-                            self.watch_panel(ui, ctx, &clip);
-                        } else {
-                            self.editor_panel(ui, ctx, &clip);
-                        }
+                        self.editor_panel(ui, ctx, &clip);
                     }
                 } else {
                     ui.centered_and_justified(|ui| {
@@ -854,26 +809,10 @@ impl ClipApp {
             });
         });
         ui.add_space(8.0);
-        ui.horizontal(|ui| {
-            self.library_tab(ui, LibraryArea::Inbox, &format!("Inbox {}", self.inbox_clips().len()));
-            self.library_tab(
-                ui,
-                LibraryArea::Published,
-                &format!("Published {}", self.published_clips().len()),
-            );
-        });
-        ui.add_space(8.0);
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                let clips = if self.library_area == LibraryArea::Published {
-                    self.published_clips()
-                        .into_iter()
-                        .cloned()
-                        .collect::<Vec<_>>()
-                } else {
-                    self.inbox_clips().into_iter().cloned().collect::<Vec<_>>()
-                };
+                let clips = self.inbox_clips().into_iter().cloned().collect::<Vec<_>>();
                 for clip in clips {
                     self.library_clip_row(ui, &clip);
                     ui.add_space(6.0);
@@ -881,31 +820,17 @@ impl ClipApp {
             });
     }
 
-    fn library_tab(&mut self, ui: &mut Ui, area: LibraryArea, label: &str) {
-        if ui
-            .selectable_label(self.library_area == area, label)
-            .clicked()
-            && self.library_area != area
-        {
-            self.library_area = area;
-            let first = if area == LibraryArea::Published {
-                self.published_clips().first().map(|clip| clip.id.clone())
-            } else {
-                self.inbox_clips().first().map(|clip| clip.id.clone())
-            };
-            self.selected_id = first;
-            self.editor = None;
-            self.time_edit = None;
-            self.session_media = None;
-            if let Some(player) = &mut self.player {
-                player.unload();
-            }
-        }
+    fn published_version_count(&self, clip_id: &str) -> usize {
+        self.jobs
+            .iter()
+            .filter(|job| job.clip_id == clip_id && job.status == "complete")
+            .count()
     }
 
     fn library_clip_row(&mut self, ui: &mut Ui, clip: &Clip) {
         let selected = self.selected_id.as_deref() == Some(&clip.id);
-        let desired = Vec2::new(ui.available_width(), 68.0);
+        let versions = self.published_version_count(&clip.id);
+        let desired = Vec2::new(ui.available_width(), 62.0);
         let id = ui.id().with(&clip.id);
         let (rect, _) = ui.allocate_exact_size(desired, Sense::hover());
         let response = ui.interact(rect, id, Sense::click());
@@ -939,50 +864,66 @@ impl ClipApp {
                 .max_rect(rect.shrink2(Vec2::new(10.0, 8.0)))
                 .sense(Sense::hover()),
             |ui| {
+                ui.spacing_mut().item_spacing = Vec2::new(8.0, 2.0);
                 ui.horizontal_centered(|ui| {
                     self.ensure_thumb(ui.ctx(), clip);
+                    let thumb_size = Vec2::new(80.0, 45.0);
                     if let Some(texture) = self.thumbs.get(&clip.id) {
                         ui.add(
-                            egui::Image::new((texture.id(), Vec2::new(72.0, 40.0)))
-                                .corner_radius(3.0)
+                            egui::Image::new((texture.id(), thumb_size))
+                                .corner_radius(4.0)
                                 .sense(Sense::hover()),
                         );
                     } else {
-                        let (thumb, _) =
-                            ui.allocate_exact_size(Vec2::new(72.0, 40.0), Sense::hover());
+                        let (thumb, _) = ui.allocate_exact_size(thumb_size, Sense::hover());
                         ui.painter()
-                            .rect_filled(thumb, CornerRadius::same(3), theme::BG);
+                            .rect_filled(thumb, CornerRadius::same(4), theme::BG);
                     }
-                    ui.add_space(8.0);
-                    ui.vertical(|ui| {
-                        ui.add(
-                            egui::Label::new(
-                                RichText::new(clip.name.clone())
-                                    .family(theme::medium())
-                                    .size(13.5),
-                            )
-                            .selectable(false)
-                            .sense(Sense::hover()),
-                        );
-                        ui.add(
-                            egui::Label::new(
-                                RichText::new(format!(
-                                    "{}×{}  ·  {} fps",
-                                    clip.width,
-                                    clip.height,
-                                    clip.fps.round()
-                                ))
-                                .color(theme::MUTED)
-                                .size(12.0),
-                            )
-                            .selectable(false)
-                            .sense(Sense::hover()),
-                        );
-                    });
+                    let meta = format!(
+                        "{}p{}  ·  {}",
+                        clip.height,
+                        clip.fps.round(),
+                        format_duration_compact(clip.duration),
+                    );
+                    let chip_reserve = if versions > 0 { 32.0 } else { 0.0 };
+                    let text_width = (ui.available_width() - chip_reserve).max(40.0);
+                    ui.allocate_ui_with_layout(
+                        Vec2::new(text_width, ui.available_height()),
+                        Layout::left_to_right(Align::Center),
+                        |ui| {
+                            ui.vertical(|ui| {
+                                ui.set_width(text_width);
+                                ui.spacing_mut().item_spacing.y = 2.0;
+                                ui.add(
+                                    egui::Label::new(
+                                        RichText::new(clip.name.clone())
+                                            .family(theme::medium())
+                                            .size(13.0),
+                                    )
+                                    .truncate()
+                                    .selectable(false)
+                                    .sense(Sense::hover()),
+                                );
+                                ui.add(
+                                    egui::Label::new(
+                                        RichText::new(meta).color(theme::MUTED).size(11.5),
+                                    )
+                                    .truncate()
+                                    .selectable(false)
+                                    .sense(Sense::hover()),
+                                );
+                            });
+                        },
+                    );
+                    if versions > 0 {
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            theme::version_chip(ui, versions);
+                        });
+                    }
                 });
             },
         );
-        if ui.interact(rect, id, Sense::click()).clicked() {
+        if response.clicked() {
             self.selected_id = Some(clip.id.clone());
         }
     }
@@ -1256,216 +1197,6 @@ impl ClipApp {
             }
         };
         self.seek_preview(time);
-    }
-
-    fn watch_panel(&mut self, ui: &mut Ui, _ctx: &egui::Context, clip: &Clip) {
-        self.editor = None;
-        self.time_edit = None;
-        let Some(job) = self.published_map().get(&clip.id).cloned() else {
-            ui.label("This clip does not have a published version yet.");
-            return;
-        };
-        self.bind_session_media(job.media_url.clone());
-        let duration = job
-            .selection
-            .as_ref()
-            .map(|selection| (selection.end - selection.start).max(0.05))
-            .unwrap_or(clip.duration);
-        let frame_step = 1.0 / published_export(&job, clip).2.max(1) as f64;
-        let size = ui.available_size();
-        let wide = size.x >= 1040.0;
-        let gap = 14.0;
-        let inspector_w = if wide {
-            (size.x * 0.30).clamp(300.0, 400.0)
-        } else {
-            0.0
-        };
-        let stage_w = if inspector_w > 0.0 {
-            size.x - inspector_w - gap
-        } else {
-            size.x
-        };
-        if wide {
-            ui.allocate_ui(Vec2::new(size.x, size.y), |ui| {
-                ui.horizontal(|ui| {
-                    ui.set_height(size.y);
-                    ui.allocate_ui_with_layout(
-                        Vec2::new(stage_w, size.y),
-                        Layout::top_down(Align::Min),
-                        |ui| {
-                            ui.set_width(stage_w);
-                            ui.set_max_height(size.y);
-                            self.watch_stage(ui, clip, &job, duration);
-                        },
-                    );
-                    ui.allocate_ui_with_layout(
-                        Vec2::new(inspector_w, size.y),
-                        Layout::top_down(Align::Min),
-                        |ui| {
-                            ui.set_width(inspector_w);
-                            ui.set_min_height(size.y);
-                            ui.set_max_height(size.y);
-                            self.watch_inspector(ui, clip, &job);
-                        },
-                    );
-                });
-            });
-        } else {
-            let stage_h = (size.y * 0.64).clamp(260.0, (size.y - 220.0).max(260.0));
-            ui.allocate_ui_with_layout(
-                Vec2::new(size.x, stage_h),
-                Layout::top_down(Align::Min),
-                |ui| {
-                    ui.set_width(size.x);
-                    ui.set_min_height(stage_h);
-                    self.watch_stage(ui, clip, &job, duration);
-                },
-            );
-            ui.add_space(10.0);
-            self.watch_inspector(ui, clip, &job);
-        }
-        ui.input(|input| {
-            if input.key_pressed(egui::Key::Space) {
-                self.toggle_playback();
-            }
-            if input.key_pressed(egui::Key::ArrowLeft) {
-                self.step_frame(if input.modifiers.shift {
-                    -1.0
-                } else {
-                    -frame_step
-                });
-            }
-            if input.key_pressed(egui::Key::ArrowRight) {
-                self.step_frame(if input.modifiers.shift {
-                    1.0
-                } else {
-                    frame_step
-                });
-            }
-        });
-    }
-
-    fn watch_stage(
-        &mut self,
-        ui: &mut Ui,
-        clip: &Clip,
-        job: &PublishJob,
-        duration: f64,
-    ) {
-        let width = ui.available_width();
-        let height = ui.available_height();
-        ui.set_min_width(width);
-        ui.set_min_height(height);
-        let time = self.playback_time();
-        let (export_width, export_height, export_fps) = published_export(job, clip);
-        ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
-            ui.set_width(width);
-            ui.add_space(14.0);
-            ui.label(
-                RichText::new(if job.media_url.is_some() {
-                    format!("Published {export_height}p{export_fps} playback")
-                } else {
-                    "No media URL on this version. Open the share link instead.".into()
-                })
-                .color(theme::MUTED)
-                .size(12.0),
-            );
-            self.timeline(ui, duration, time);
-            self.editor_transport(ui, duration, true);
-            let leftover = ui.available_size();
-            ui.allocate_ui_with_layout(leftover, Layout::top_down(Align::Min), |ui| {
-                ui.set_width(width);
-                ui.set_min_height(leftover.y);
-                ui.horizontal(|ui| {
-                    ui.label(
-                        RichText::new(clip.name.clone())
-                            .family(theme::medium())
-                            .size(16.0),
-                    );
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        ui.label(
-                            RichText::new(format!(
-                                "{export_width}×{export_height}  ·  {export_fps} fps  ·  published"
-                            ))
-                            .color(theme::MUTED)
-                            .size(12.0),
-                        );
-                    });
-                });
-                self.editor_preview(ui, clip, false);
-            });
-        });
-    }
-
-    fn watch_inspector(&mut self, ui: &mut Ui, clip: &Clip, job: &PublishJob) {
-        let column_width = ui.available_width();
-        egui::ScrollArea::vertical()
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                ui.set_width(column_width);
-                ui.with_layout(Layout::top_down_justified(Align::Min), |ui| {
-                    theme::card().show(ui, |ui| {
-                        ui.set_width(ui.available_width());
-                        ui.label(RichText::new("Share").family(theme::medium()).size(14.5));
-                        ui.label(
-                            RichText::new(expiry_label(job.expires_at.as_deref()))
-                                .color(theme::ACCENT)
-                                .size(12.0),
-                        );
-                        ui.label(
-                            RichText::new("This is the live cloud copy. Deleting it removes the share link.")
-                                .color(theme::MUTED)
-                                .size(12.0),
-                        );
-                        if let Some(url) = &job.url {
-                            ui.add_space(8.0);
-                            ui.label(RichText::new(url.clone()).small().color(theme::MUTED));
-                            ui.add_space(8.0);
-                            if ui
-                                .add_sized(
-                                    [ui.available_width(), 32.0],
-                                    egui::Button::new(
-                                        RichText::new("Copy link")
-                                            .color(theme::INK)
-                                            .family(theme::medium()),
-                                    )
-                                    .fill(theme::ACCENT),
-                                )
-                                .clicked()
-                            {
-                                copy_text(url);
-                                self.set_notice("Published link copied.");
-                            }
-                            ui.add_space(6.0);
-                            if ui
-                                .add_sized(
-                                    [ui.available_width(), 28.0],
-                                    egui::Button::new("Open in browser"),
-                                )
-                                .clicked()
-                            {
-                                let _ = open::that(url);
-                            }
-                        }
-                        ui.add_space(10.0);
-                        if ui
-                            .add_sized(
-                                [ui.available_width(), 28.0],
-                                egui::Button::new("Delete published clip"),
-                            )
-                            .clicked()
-                        {
-                            let engine = self.engine.clone();
-                            let id = clip.id.clone();
-                            self.selected_id = None;
-                            self.run_async(async move {
-                                engine.delete_published(&id).await?;
-                                Ok(Message::Refresh)
-                            });
-                        }
-                    });
-                });
-            });
     }
 
     fn editor_panel(&mut self, ui: &mut Ui, ctx: &egui::Context, clip: &Clip) {
@@ -2103,7 +1834,7 @@ impl ClipApp {
                                 );
                                 if job.status == "complete" {
                                     ui.label(
-                                        RichText::new("Ready")
+                                        RichText::new(expiry_label(job.expires_at.as_deref()))
                                             .color(theme::MUTED)
                                             .size(12.0),
                                     );
@@ -2690,11 +2421,15 @@ fn copy_text(value: &str) {
     }
 }
 
-fn published_export(job: &PublishJob, clip: &Clip) -> (i64, i64, i64) {
-    if let Some(export) = job.selection.as_ref().and_then(|selection| selection.export.as_ref()) {
-        (export.width, export.height, export.fps)
+fn format_duration_compact(seconds: f64) -> String {
+    let total = seconds.max(0.0).round() as i64;
+    let hours = total / 3600;
+    let minutes = (total % 3600) / 60;
+    let secs = total % 60;
+    if hours > 0 {
+        format!("{hours}:{minutes:02}:{secs:02}")
     } else {
-        (clip.width, clip.height, clip.fps.round().clamp(1.0, 240.0) as i64)
+        format!("{minutes}:{secs:02}")
     }
 }
 
