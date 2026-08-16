@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "Local-first game clip editor and publisher"
+description = "Dabs Clip Engine desktop app"
 default-run = "clip-engine"
 
 [dependencies]
@@ -27,15 +27,26 @@ winit = { version = "0.30", default-features = false, features = ["x11"] }
 [build-dependencies]
 pkg-config = "0.3"
 
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
+
 [package.metadata.packager]
-product-name = "Clip Engine"
+product-name = "Dabs Clip Engine"
 identifier = "dev.dab.clip-engine"
+publisher = "Dabs"
 category = "Video"
 out-dir = "../../dist/desktop"
 before-packaging-command = "cargo build -p clip-engine --release --bin clip-engine"
 formats = ["deb", "appimage", "nsis"]
 homepage = "https://github.com/aaronfisher-code/clip-engine"
-icons = ["assets/clip-engine.png"]
+icons = [
+  "assets/icons/32x32.png",
+  "assets/icons/64x64.png",
+  "assets/icons/128x128.png",
+  "assets/icons/128x128@2x.png",
+  "assets/clip-engine.png",
+  "assets/clip-engine.ico",
+]
 resources = [
   { src = "../../resources/binaries", target = "binaries" },
   { src = "../../resources/binaries/*.dll", target = "." },
@@ -44,3 +55,4 @@ resources = [
 
 [package.metadata.packager.nsis]
 installer-mode = "currentUser"
+installer-icon = "assets/clip-engine.ico"

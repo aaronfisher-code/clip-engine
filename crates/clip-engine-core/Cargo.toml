@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "Local library, FFmpeg export, and Cloudflare client for Clip Engine"
+description = "Local library, FFmpeg export, and Cloudflare client for Dabs Clip Engine"
 
 [dependencies]
 anyhow = "1"
