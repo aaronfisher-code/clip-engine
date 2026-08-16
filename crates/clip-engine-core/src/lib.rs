@@ -5,6 +5,7 @@ pub mod engine;
 pub mod media;
 pub mod models;
 pub mod paths;
+pub mod updater;
 
 pub use engine::Engine;
 pub use media::{
@@ -13,3 +14,4 @@ pub use media::{
 };
 pub use models::*;
 pub use paths::AppPaths;
+pub use updater::{install_desktop_update, AvailableUpdate, UpdatePackage};

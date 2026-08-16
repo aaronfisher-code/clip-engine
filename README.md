@@ -199,21 +199,51 @@ window.
 
 ### 7. Publish desktop installers
 
-Bump the version in `package.json` and `Cargo.toml`, then push a version tag:
+The `release` branch is the automatic publisher. Every push to it patch-bumps the
+desktop version, builds Windows NSIS and Linux AppImage/deb packages with bundled
+FFmpeg and libmpv, then **publishes** a GitHub Release. Friends on a build that
+includes the in-app updater are offered that release after the workflow finishes.
+
+Create the branch once from the commit you want to ship:
+
+```bash
+git checkout rust-rewrite
+git checkout -b release
+git push -u origin release
+```
+
+Later, merge or cherry-pick onto `release` and push:
+
+```bash
+git checkout release
+git merge rust-rewrite
+git push
+```
+
+Put `[minor]` or `[major]` in the commit message to bump those instead of patch.
+The workflow writes a `chore(release): vX.Y.Z` commit and tag after both
+installers succeed, so a failed build does not consume a version number.
+
+To ship a **draft** for testing without publishing, push a version tag from any
+branch (after bumping `package.json` and `Cargo.toml` yourself):
 
 ```bash
 git tag v1.0.1
 git push origin v1.0.1
 ```
 
-The **Desktop release** workflow builds Windows NSIS and Linux AppImage/deb packages
-with bundled FFmpeg and libmpv, then creates a draft GitHub Release. Test both
-installers and publish the draft. There is no in-app auto-updater yet; friends install
-the new package from the release.
+The desktop checks
+`https://api.github.com/repos/aaronfisher-code/clip-engine/releases/latest`
+on launch (and when **Check for updates** is used). Drafts and pre-releases are
+ignored. Windows installs the new NSIS package silently for the current user;
+Linux prefers the AppImage (replacing the running AppImage when `APPIMAGE` is set)
+and otherwise opens the downloaded package. There is no extra update server:
+the installer files already attached to the GitHub Release are the update payload.
 
 Windows Authenticode signing can be added before broad distribution if you want to
 avoid SmartScreen reputation warnings. Linux package signing can likewise be added for
-an apt repository.
+an apt repository. Auto-update itself verifies the download over HTTPS from GitHub;
+it does not yet verify a separate packager signature.
 
 ## Storage and deletion behavior
 

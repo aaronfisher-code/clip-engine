@@ -11,7 +11,9 @@
 - Device-only: the opaque device token in the OS credential vault and local recordings.
   The desktop is a native process (egui + libmpv). There is no embedded webview, so
   renderer CSP does not apply; cloud calls still leave the device only as HTTPS to the
-  Worker and scoped R2 uploads.
+  Worker and scoped R2 uploads. Desktop updates are downloaded from public GitHub
+  Release assets over HTTPS and installed by the NSIS/AppImage/deb package already
+  attached to that release.
 
 ## Account authentication
 

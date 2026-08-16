@@ -33,5 +33,9 @@ identifier = "dev.dab.clip-engine"
 category = "Video"
 out-dir = "dist/desktop"
 formats = ["appimage", "deb", "nsis"]
+homepage = "https://github.com/aaronfisher-code/clip-engine"
 icons = ["crates/clip-engine/assets/clip-engine.png"]
 resources = ["resources/binaries", "resources/THIRD_PARTY_NOTICES.md"]
+
+[package.metadata.packager.nsis]
+installer-mode = "currentUser"

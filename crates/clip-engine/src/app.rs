@@ -3,7 +3,10 @@ use crate::theme;
 use clip_engine_core::cloud::{AccessRequest, AdminUser, CloudClip, CloudUser, PasswordReset};
 use clip_engine_core::models::{AppConfig, Clip, PublishJob, Selection};
 use clip_engine_core::paths::{default_inbox_dir, path_is_within, video_dir};
-use clip_engine_core::{export_options, format_file_size, safe_base_name, Engine, PublishOption};
+use clip_engine_core::{
+    export_options, format_file_size, install_desktop_update, safe_base_name, AvailableUpdate,
+    Engine, PublishOption,
+};
 use eframe::egui::{
     self, Align, Color32, ColorImage, CornerRadius, CursorIcon, Layout, Pos2, Rect, RichText,
     Sense, StrokeKind, TextureHandle, TextureOptions, Ui, UiBuilder, Vec2,
@@ -41,6 +44,15 @@ enum Message {
     Busy(bool),
     ExportProgress(f64),
     ExportDone(PathBuf),
+    UpdateAvailable {
+        update: Option<AvailableUpdate>,
+        manual: bool,
+    },
+    UpdateProgress {
+        received: u64,
+        total: u64,
+    },
+    UpdateDownloaded(PathBuf),
 }
 
 struct EditorState {
@@ -97,6 +109,13 @@ enum ExportModal {
     },
 }
 
+#[derive(Clone)]
+enum UpdateModal {
+    Prompt,
+    Downloading { received: u64, total: u64 },
+    Installing,
+}
+
 pub struct ClipApp {
     engine: Engine,
     player: Option<Player>,
@@ -142,6 +161,9 @@ pub struct ClipApp {
     timeline_drag: Option<TimelineDrag>,
     time_edit: Option<TimeEdit>,
     drop_hovering: bool,
+    available_update: Option<AvailableUpdate>,
+    update_modal: Option<UpdateModal>,
+    update_checking: bool,
 }
 
 impl ClipApp {
@@ -183,7 +205,7 @@ impl ClipApp {
         {
             Ok(player) => Some(player),
             Err(error) => {
-                return Self {
+                let mut app = Self {
                     player: None,
                     player_error: Some(error.to_string()),
                     engine,
@@ -228,7 +250,12 @@ impl ClipApp {
                     timeline_drag: None,
                     time_edit: None,
                     drop_hovering: false,
+                    available_update: None,
+                    update_modal: None,
+                    update_checking: false,
                 };
+                app.schedule_update_check(false);
+                return app;
             }
         };
         let mut app = Self {
@@ -276,9 +303,13 @@ impl ClipApp {
             timeline_drag: None,
             time_edit: None,
             drop_hovering: false,
+            available_update: None,
+            update_modal: None,
+            update_checking: false,
         };
         app.bootstrap_session();
         app.ensure_valid_selection();
+        app.schedule_update_check(false);
         app
     }
 
@@ -329,6 +360,66 @@ impl ClipApp {
         }
     }
 
+    fn schedule_update_check(&mut self, manual: bool) {
+        if self.update_checking {
+            return;
+        }
+        if std::env::var_os("CLIP_ENGINE_SKIP_UPDATES").is_some() {
+            return;
+        }
+        self.update_checking = true;
+        if manual {
+            self.dismiss_error();
+        }
+        let engine = self.engine.clone();
+        let tx = self.tx.clone();
+        self.engine.spawn(async move {
+            match engine.check_desktop_update(manual).await {
+                Ok(update) => {
+                    let _ = tx.send(Message::UpdateAvailable { update, manual });
+                }
+                Err(error) => {
+                    if manual {
+                        let _ = tx.send(Message::Error(format!("{error:#}")));
+                    } else {
+                        let _ = tx.send(Message::UpdateAvailable {
+                            update: None,
+                            manual: false,
+                        });
+                    }
+                }
+            }
+        });
+    }
+
+    fn start_update_download(&mut self) {
+        let Some(update) = self.available_update.clone() else {
+            return;
+        };
+        self.update_modal = Some(UpdateModal::Downloading {
+            received: 0,
+            total: update.size.max(1),
+        });
+        let engine = self.engine.clone();
+        let tx = self.tx.clone();
+        self.engine.spawn(async move {
+            let progress_tx = tx.clone();
+            match engine
+                .download_desktop_update(&update, move |received, total| {
+                    let _ = progress_tx.send(Message::UpdateProgress { received, total });
+                })
+                .await
+            {
+                Ok(path) => {
+                    let _ = tx.send(Message::UpdateDownloaded(path));
+                }
+                Err(error) => {
+                    let _ = tx.send(Message::Error(format!("{error:#}")));
+                }
+            }
+        });
+    }
+
     fn set_notice(&mut self, value: impl Into<String>) {
         self.notice = Some(value.into());
         self.notice_until = Some(Instant::now() + Duration::from_secs(5));
@@ -350,22 +441,16 @@ impl ClipApp {
     }
 
     fn expire_toasts(&mut self, ctx: &egui::Context) {
-        if self.error_until.is_some() {
-            let remaining = self
-                .error_until
-                .unwrap()
-                .saturating_duration_since(Instant::now());
+        if let Some(until) = self.error_until {
+            let remaining = until.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
                 self.dismiss_error();
             } else {
                 ctx.request_repaint_after(remaining);
             }
         }
-        if self.notice_until.is_some() {
-            let remaining = self
-                .notice_until
-                .unwrap()
-                .saturating_duration_since(Instant::now());
+        if let Some(until) = self.notice_until {
+            let remaining = until.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
                 self.dismiss_notice();
             } else {
@@ -380,8 +465,12 @@ impl ClipApp {
                 Message::Error(value) => {
                     self.set_error(value);
                     self.busy = false;
+                    self.update_checking = false;
                     if matches!(self.export_modal, Some(ExportModal::Working { .. })) {
                         self.export_modal = None;
+                    }
+                    if matches!(self.update_modal, Some(UpdateModal::Downloading { .. })) {
+                        self.update_modal = Some(UpdateModal::Prompt);
                     }
                 }
                 Message::Notice(value) => {
@@ -437,6 +526,50 @@ impl ClipApp {
                 Message::ExportDone(path) => {
                     self.export_modal = Some(ExportModal::Done { path });
                     self.busy = false;
+                }
+                Message::UpdateAvailable { update, manual } => {
+                    self.update_checking = false;
+                    match update {
+                        Some(update) => {
+                            let snoozed = self
+                                .engine
+                                .snoozed_update_version()
+                                .is_some_and(|version| version == update.version);
+                            self.available_update = Some(update);
+                            if manual || !snoozed {
+                                self.update_modal = Some(UpdateModal::Prompt);
+                            }
+                        }
+                        None => {
+                            self.available_update = None;
+                            if manual {
+                                self.set_notice(format!(
+                                    "Clip Engine {} is current.",
+                                    Engine::current_version()
+                                ));
+                            }
+                        }
+                    }
+                }
+                Message::UpdateProgress { received, total } => {
+                    if let Some(UpdateModal::Downloading { .. }) = &mut self.update_modal {
+                        self.update_modal = Some(UpdateModal::Downloading { received, total });
+                    }
+                }
+                Message::UpdateDownloaded(path) => {
+                    if let Some(update) = self.available_update.clone() {
+                        self.update_modal = Some(UpdateModal::Installing);
+                        if let Some(player) = &self.player {
+                            player.pause();
+                        }
+                        match install_desktop_update(&path, update.package) {
+                            Ok(()) => std::process::exit(0),
+                            Err(error) => {
+                                self.update_modal = Some(UpdateModal::Prompt);
+                                self.set_error(error.to_string());
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -580,9 +713,12 @@ impl eframe::App for ClipApp {
                                 .size(16.0),
                         );
                         ui.label(
-                            RichText::new("Local 120 fps trim deck")
-                                .color(theme::MUTED)
-                                .size(11.5),
+                            RichText::new(format!(
+                                "Local 120 fps trim deck  ·  v{}",
+                                Engine::current_version()
+                            ))
+                            .color(theme::MUTED)
+                            .size(11.5),
                         );
                     });
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -617,6 +753,23 @@ impl eframe::App for ClipApp {
                                     engine.admin_access_requests().await?,
                                 ))
                             });
+                        }
+                        let update_label = if self.available_update.is_some() {
+                            "Update available"
+                        } else if self.update_checking {
+                            "Checking…"
+                        } else {
+                            "Check for updates"
+                        };
+                        if ui
+                            .add_enabled(!self.update_checking, egui::Button::new(update_label))
+                            .clicked()
+                        {
+                            if self.available_update.is_some() {
+                                self.update_modal = Some(UpdateModal::Prompt);
+                            } else {
+                                self.schedule_update_check(true);
+                            }
                         }
                     });
                 });
@@ -712,6 +865,9 @@ impl eframe::App for ClipApp {
         if self.export_modal.is_some() {
             self.export_flow_modal(ctx);
         }
+        if self.update_modal.is_some() {
+            self.update_flow_modal(ctx);
+        }
 
         if self.drop_hovering {
             theme::window_drop_overlay(ctx);
@@ -724,6 +880,11 @@ impl eframe::App for ClipApp {
             .as_ref()
             .is_some_and(|player| player.playing() || player.buffering() || player.wants_redraw())
             || matches!(self.export_modal, Some(ExportModal::Working { .. }))
+            || matches!(
+                self.update_modal,
+                Some(UpdateModal::Downloading { .. } | UpdateModal::Installing)
+            )
+            || self.update_checking
         {
             ctx.request_repaint();
         }
@@ -772,6 +933,43 @@ impl ClipApp {
             });
             ui.add_space(8.0);
             return;
+        }
+        if let Some(update) = self.available_update.clone() {
+            if !matches!(
+                self.update_modal,
+                Some(UpdateModal::Downloading { .. } | UpdateModal::Installing)
+            ) {
+                theme::card().show(ui, |ui| {
+                    ui.set_min_width(ui.available_width());
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new(format!("Clip Engine {} is ready.", update.version))
+                                .family(theme::medium())
+                                .color(theme::ACCENT),
+                        );
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if ui.button("Install").clicked() {
+                                self.update_modal = Some(UpdateModal::Prompt);
+                            }
+                            if ui
+                                .add(egui::Button::new(RichText::new("Later").size(12.0)))
+                                .clicked()
+                            {
+                                let _ = self.engine.snooze_update(&update.version);
+                                self.available_update = None;
+                                self.update_modal = None;
+                            }
+                        });
+                    });
+                    ui.add_space(2.0);
+                    ui.label(
+                        RichText::new("Downloaded from the published GitHub Release.")
+                            .color(theme::MUTED)
+                            .size(12.0),
+                    );
+                });
+                ui.add_space(8.0);
+            }
         }
         if let Some(error) = self.error.clone() {
             theme::card().show(ui, |ui| {
@@ -2764,6 +2962,115 @@ impl ClipApp {
         });
     }
 
+    fn update_flow_modal(&mut self, ctx: &egui::Context) {
+        let Some(update) = self.available_update.clone() else {
+            self.update_modal = None;
+            return;
+        };
+        let Some(modal) = self.update_modal.clone() else {
+            return;
+        };
+        let blocking = !matches!(modal, UpdateModal::Prompt);
+        let mut open = true;
+        let mut window = egui::Window::new(format!("Clip Engine {}", update.version))
+            .id(egui::Id::new("update-flow"))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO);
+        if !blocking {
+            window = window.open(&mut open);
+        }
+        window.show(ctx, |ui| {
+            ui.set_width(380.0);
+            match modal {
+                UpdateModal::Prompt => {
+                    ui.label(
+                        RichText::new("A published GitHub Release is newer than this build.")
+                            .color(theme::MUTED)
+                            .size(12.5),
+                    );
+                    ui.add_space(8.0);
+                    ui.label(
+                        RichText::new(format!(
+                            "{}  ·  {}",
+                            update.asset_name,
+                            format_file_size(update.size)
+                        ))
+                        .monospace()
+                        .size(12.0)
+                        .color(theme::TEXT),
+                    );
+                    let notes = condensed_release_notes(&update.notes);
+                    if !notes.is_empty() {
+                        ui.add_space(10.0);
+                        ui.label(RichText::new(notes).size(13.0));
+                    }
+                    ui.add_space(12.0);
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    RichText::new("Install now")
+                                        .color(theme::INK)
+                                        .family(theme::medium()),
+                                )
+                                .fill(theme::ACCENT),
+                            )
+                            .clicked()
+                        {
+                            self.start_update_download();
+                        }
+                        if ui.button("Later").clicked() {
+                            let _ = self.engine.snooze_update(&update.version);
+                            self.update_modal = None;
+                        }
+                        if ui.link("View release").clicked() {
+                            let _ = open::that(&update.html_url);
+                        }
+                    });
+                }
+                UpdateModal::Downloading { received, total } => {
+                    let fraction = (received as f32 / total.max(1) as f32).clamp(0.0, 1.0);
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new("Downloading installer")
+                                .family(theme::medium())
+                                .color(theme::ACCENT),
+                        );
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            ui.label(
+                                RichText::new(format!("{:.0}%", fraction * 100.0))
+                                    .monospace()
+                                    .color(theme::TEXT),
+                            );
+                        });
+                    });
+                    ui.add_space(6.0);
+                    theme::progress_bar(ui, fraction);
+                    ui.add_space(4.0);
+                    ui.label(
+                        RichText::new(format!(
+                            "{} / {}",
+                            format_file_size(received),
+                            format_file_size(total)
+                        ))
+                        .color(theme::MUTED)
+                        .size(12.0),
+                    );
+                }
+                UpdateModal::Installing => {
+                    ui.label(
+                        RichText::new("The installer is starting. Clip Engine will close.")
+                            .color(theme::MUTED),
+                    );
+                }
+            }
+        });
+        if !open && !blocking {
+            self.update_modal = None;
+        }
+    }
+
     fn export_flow_modal(&mut self, ctx: &egui::Context) {
         let Some(modal) = self.export_modal.clone() else {
             return;
@@ -2978,6 +3285,21 @@ impl ClipApp {
         if !open {
             self.created_reset = None;
         }
+    }
+}
+
+fn condensed_release_notes(notes: &str) -> String {
+    let trimmed = notes.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    let first = trimmed.lines().take(6).collect::<Vec<_>>().join("\n");
+    if first.chars().count() > 360 {
+        let mut short = first.chars().take(360).collect::<String>();
+        short.push('…');
+        short
+    } else {
+        first
     }
 }
 
