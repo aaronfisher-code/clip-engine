@@ -36,7 +36,7 @@ jobs:
       draft: ${{ steps.plan.outputs.draft }}
       apply: ${{ steps.plan.outputs.apply }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - uses: actions/setup-node@v4
@@ -99,7 +99,7 @@ jobs:
     steps:
       - name: Keep LF line endings
         run: git config --global core.autocrlf false
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-node@v4
         with:
           node-version: 24
@@ -193,7 +193,7 @@ jobs:
     needs: [prepare, package]
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
           ref: ${{ github.sha }}
