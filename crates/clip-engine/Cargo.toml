@@ -31,11 +31,12 @@ pkg-config = "0.3"
 product-name = "Clip Engine"
 identifier = "dev.dab.clip-engine"
 category = "Video"
-out-dir = "dist/desktop"
-formats = ["appimage", "deb", "nsis"]
+out-dir = "../../dist/desktop"
+before-packaging-command = "cargo build -p clip-engine --release --bin clip-engine"
+formats = ["deb", "appimage", "nsis"]
 homepage = "https://github.com/aaronfisher-code/clip-engine"
-icons = ["crates/clip-engine/assets/clip-engine.png"]
-resources = ["resources/binaries", "resources/THIRD_PARTY_NOTICES.md"]
+icons = ["assets/clip-engine.png"]
+resources = ["../../resources/binaries", "../../resources/THIRD_PARTY_NOTICES.md"]
 
 [package.metadata.packager.nsis]
 installer-mode = "currentUser"

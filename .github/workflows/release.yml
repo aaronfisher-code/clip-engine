@@ -90,7 +90,7 @@ jobs:
       matrix:
         include:
           - platform: ubuntu-24.04
-            formats: appimage,deb
+            formats: deb,appimage
             archive: ffmpeg-master-latest-linux64-gpl.tar.xz
           - platform: windows-2025
             formats: nsis
@@ -162,8 +162,26 @@ jobs:
           "MPV_LIB_DIR=$($root.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
       - name: Install cargo-packager
         run: cargo install cargo-packager --locked
+      - name: Build release binary
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target
+        run: cargo build -p clip-engine --release --bin clip-engine
+      - name: Confirm release binary
+        shell: bash
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target
+        run: |
+          set -euo pipefail
+          if [[ "${RUNNER_OS}" == "Windows" ]]; then
+            bin="${CARGO_TARGET_DIR}/release/clip-engine.exe"
+          else
+            bin="${CARGO_TARGET_DIR}/release/clip-engine"
+          fi
+          ls -la "${CARGO_TARGET_DIR}/release"
+          test -f "${bin}"
       - name: Package
         env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: cargo packager -p clip-engine --release --formats ${{ matrix.formats }}
       - uses: actions/upload-artifact@v4
