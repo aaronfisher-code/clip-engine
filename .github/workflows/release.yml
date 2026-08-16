@@ -222,7 +222,7 @@ jobs:
         with:
           path: dist/desktop
           merge-multiple: true
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ needs.prepare.outputs.tag }}
           name: Dabs Clip Engine ${{ needs.prepare.outputs.tag }}
