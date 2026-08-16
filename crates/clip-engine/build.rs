@@ -3,6 +3,11 @@ fn main() {
     println!("cargo:rerun-if-changed=assets/clip-engine.ico");
     embed_windows_icon();
     link_mpv();
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN");
+        println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN/binaries");
+    }
 }
 
 fn embed_windows_icon() {

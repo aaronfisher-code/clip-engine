@@ -130,7 +130,9 @@ jobs:
           cp /tmp/clip-engine-ffmpeg/ffmpeg-*/bin/ffmpeg resources/binaries/ffmpeg
           cp /tmp/clip-engine-ffmpeg/ffmpeg-*/bin/ffprobe resources/binaries/ffprobe
           chmod 755 resources/binaries/ffmpeg resources/binaries/ffprobe
-          cp "$(pkg-config --variable=libdir mpv)/libmpv.so.2" resources/binaries/libmpv.so.2 || true
+          libdir="$(pkg-config --variable=libdir mpv)"
+          cp -L "${libdir}/libmpv.so.2" resources/binaries/libmpv.so.2
+          test -s resources/binaries/libmpv.so.2
       - name: Bundle FFmpeg on Windows
         if: runner.os == 'Windows'
         shell: pwsh

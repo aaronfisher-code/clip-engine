@@ -1,4 +1,4 @@
-use eframe::egui::{self, PaintCallback, Rect};
+use eframe::egui::{self, ColorImage, PaintCallback, Rect, TextureOptions};
 use eframe::egui_glow::CallbackFn;
 use glow::HasContext;
 use raw_window_handle::{DisplayHandle, RawDisplayHandle};
@@ -19,6 +19,10 @@ const MPV_RENDER_PARAM_FLIP_Y: u32 = 4;
 const MPV_RENDER_PARAM_X11_DISPLAY: u32 = 8;
 const MPV_RENDER_PARAM_WL_DISPLAY: u32 = 9;
 const MPV_RENDER_PARAM_BLOCK_FOR_TARGET_TIME: u32 = 12;
+const MPV_RENDER_PARAM_SW_SIZE: u32 = 17;
+const MPV_RENDER_PARAM_SW_FORMAT: u32 = 18;
+const MPV_RENDER_PARAM_SW_STRIDE: u32 = 19;
+const MPV_RENDER_PARAM_SW_POINTER: u32 = 20;
 const MPV_RENDER_UPDATE_FRAME: u64 = 1;
 
 #[repr(C)]
@@ -154,11 +158,20 @@ struct RenderShared {
     pending_play: AtomicBool,
 }
 
+enum VideoBackend {
+    OpenGl,
+    Software,
+}
+
 pub struct Player {
     handle: *mut MpvHandle,
     render: *mut MpvRenderContext,
     shared: Arc<RenderShared>,
-    callback: Arc<CallbackFn>,
+    callback: Option<Arc<CallbackFn>>,
+    backend: VideoBackend,
+    sw_pixels: Vec<u8>,
+    sw_size: [i32; 2],
+    sw_texture: Option<egui::TextureHandle>,
     update_ctx: *mut egui::Context,
     loaded_path: Option<String>,
     pending_seek: Option<f64>,
@@ -175,7 +188,7 @@ unsafe impl Send for Player {}
 impl Player {
     pub fn new(
         ctx: &egui::Context,
-        _get_proc_address: Option<&dyn Fn(&CStr) -> *const c_void>,
+        opengl_available: bool,
         display: Option<DisplayHandle<'_>>,
     ) -> anyhow::Result<Self> {
         unsafe {
@@ -184,10 +197,14 @@ impl Player {
                 anyhow::bail!("Could not create the libmpv player");
             }
             set_option(handle, "vo", "libmpv")?;
-            set_option(handle, "hwdec", "auto-copy-safe")
-                .or_else(|_| set_option(handle, "hwdec", "auto-copy"))
-                .or_else(|_| set_option(handle, "hwdec", "auto-safe"))?;
-            set_option(handle, "gpu-hwdec-interop", "auto")?;
+            if opengl_available {
+                set_option(handle, "hwdec", "auto-copy-safe")
+                    .or_else(|_| set_option(handle, "hwdec", "auto-copy"))
+                    .or_else(|_| set_option(handle, "hwdec", "auto-safe"))?;
+                let _ = set_option(handle, "gpu-hwdec-interop", "auto");
+            } else {
+                let _ = set_option(handle, "hwdec", "no");
+            }
             set_option(handle, "pause", "yes")?;
             set_option(handle, "hr-seek", "always")?;
             set_option(handle, "keep-open", "yes")?;
@@ -210,58 +227,26 @@ impl Player {
             let _ = set_option(handle, "msg-level", "all=error");
             let _ = set_option(handle, "mute", "no");
             let _ = set_option(handle, "volume", "100");
-            let _ = set_option(handle, "ao", "pipewire,pulse,alsa");
+            if cfg!(windows) {
+                let _ = set_option(handle, "ao", "wasapi");
+            } else {
+                let _ = set_option(handle, "ao", "pipewire,pulse,alsa");
+            }
             check(mpv_initialize(handle))?;
 
-            let mut init = MpvOpenglInitParams {
-                get_proc_address: gl_get_proc_address,
-                get_proc_address_ctx: ptr::null_mut(),
-            };
-            let api = CString::new("opengl").unwrap();
-            let mut display_param = MpvRenderParam {
-                type_: MPV_RENDER_PARAM_INVALID,
-                data: ptr::null_mut(),
-            };
-            let mut display_ptr = ptr::null_mut::<c_void>();
-            if let Some(display) = display {
-                match display.as_raw() {
-                    RawDisplayHandle::Wayland(wayland) => {
-                        display_ptr = wayland.display.as_ptr();
-                        display_param.type_ = MPV_RENDER_PARAM_WL_DISPLAY;
-                        display_param.data = display_ptr;
-                    }
-                    RawDisplayHandle::Xlib(xlib) => {
-                        if let Some(display) = xlib.display {
-                            display_ptr = display.as_ptr();
-                            display_param.type_ = MPV_RENDER_PARAM_X11_DISPLAY;
-                            display_param.data = display_ptr;
-                        }
-                    }
-                    _ => {}
+            let mut backend = VideoBackend::Software;
+            let mut render = ptr::null_mut();
+            if opengl_available {
+                if let Ok(created) = create_opengl_render(handle, display) {
+                    render = created;
+                    backend = VideoBackend::OpenGl;
                 }
             }
-            let _ = display_ptr;
-            let mut params = [
-                MpvRenderParam {
-                    type_: MPV_RENDER_PARAM_API_TYPE,
-                    data: api.as_ptr().cast_mut().cast(),
-                },
-                MpvRenderParam {
-                    type_: MPV_RENDER_PARAM_OPENGL_INIT_PARAMS,
-                    data: (&mut init as *mut MpvOpenglInitParams).cast(),
-                },
-                display_param,
-                MpvRenderParam {
-                    type_: MPV_RENDER_PARAM_INVALID,
-                    data: ptr::null_mut(),
-                },
-            ];
-            let mut render = ptr::null_mut();
-            check(mpv_render_context_create(
-                &mut render,
-                handle,
-                params.as_mut_ptr(),
-            ))?;
+            if render.is_null() {
+                let _ = set_property(handle, "hwdec", "no");
+                render = create_software_render(handle)?;
+                backend = VideoBackend::Software;
+            }
 
             let update_ctx = Box::into_raw(Box::new(ctx.clone()));
             mpv_render_context_set_update_callback(render, on_mpv_update, update_ctx.cast());
@@ -275,16 +260,22 @@ impl Player {
                 resume_after_seek: AtomicBool::new(false),
                 pending_play: AtomicBool::new(false),
             });
-            let paint_shared = shared.clone();
-            let callback = Arc::new(CallbackFn::new(move |info, painter| {
-                paint_video(&paint_shared, info, painter);
-            }));
+            let callback = matches!(backend, VideoBackend::OpenGl).then(|| {
+                let paint_shared = shared.clone();
+                Arc::new(CallbackFn::new(move |info, painter| {
+                    paint_video(&paint_shared, info, painter);
+                }))
+            });
 
             Ok(Self {
                 handle,
                 render,
                 shared,
                 callback,
+                backend,
+                sw_pixels: Vec::new(),
+                sw_size: [0, 0],
+                sw_texture: None,
                 update_ctx,
                 loaded_path: None,
                 pending_seek: None,
@@ -298,10 +289,95 @@ impl Player {
         }
     }
 
-    pub fn paint(&self, rect: Rect) -> PaintCallback {
-        PaintCallback {
-            rect,
-            callback: self.callback.clone(),
+    pub fn paint(&mut self, ui: &mut egui::Ui, rect: Rect) {
+        match self.backend {
+            VideoBackend::OpenGl => {
+                if let Some(callback) = &self.callback {
+                    ui.painter().add(PaintCallback {
+                        rect,
+                        callback: callback.clone(),
+                    });
+                }
+            }
+            VideoBackend::Software => self.paint_software(ui, rect),
+        }
+    }
+
+    fn paint_software(&mut self, ui: &mut egui::Ui, rect: Rect) {
+        let width = (rect.width().round() as i32).clamp(2, 1920);
+        let height = (rect.height().round() as i32).clamp(2, 1080);
+        let stride = (width as usize) * 4;
+        if self.sw_size != [width, height] {
+            self.sw_size = [width, height];
+            self.sw_pixels.resize(stride * height as usize, 0);
+        }
+        unsafe {
+            let flags = mpv_render_context_update(self.render);
+            let has_frame = flags & MPV_RENDER_UPDATE_FRAME != 0;
+            let seek_ready = self.shared.seek_restarted.load(Ordering::SeqCst);
+            let force_render =
+                self.shared.awaiting_seek_frame.load(Ordering::Relaxed) && seek_ready;
+            if has_frame || force_render || self.sw_texture.is_none() {
+                let mut size = [width, height];
+                let mut stride_value = stride;
+                let format = CString::new("rgba").expect("rgba");
+                let mut params = [
+                    MpvRenderParam {
+                        type_: MPV_RENDER_PARAM_SW_SIZE,
+                        data: size.as_mut_ptr().cast(),
+                    },
+                    MpvRenderParam {
+                        type_: MPV_RENDER_PARAM_SW_FORMAT,
+                        data: format.as_ptr().cast_mut().cast(),
+                    },
+                    MpvRenderParam {
+                        type_: MPV_RENDER_PARAM_SW_STRIDE,
+                        data: (&mut stride_value as *mut usize).cast(),
+                    },
+                    MpvRenderParam {
+                        type_: MPV_RENDER_PARAM_SW_POINTER,
+                        data: self.sw_pixels.as_mut_ptr().cast(),
+                    },
+                    MpvRenderParam {
+                        type_: MPV_RENDER_PARAM_INVALID,
+                        data: ptr::null_mut(),
+                    },
+                ];
+                if check(mpv_render_context_render(self.render, params.as_mut_ptr())).is_ok() {
+                    let image = ColorImage::from_rgba_unmultiplied(
+                        [width as usize, height as usize],
+                        &self.sw_pixels,
+                    );
+                    match &mut self.sw_texture {
+                        Some(texture) => texture.set(image, TextureOptions::LINEAR),
+                        None => {
+                            self.sw_texture = Some(ui.ctx().load_texture(
+                                "clip-engine-video",
+                                image,
+                                TextureOptions::LINEAR,
+                            ));
+                        }
+                    }
+                    if has_frame {
+                        self.shared.awaiting_frame.store(false, Ordering::Relaxed);
+                    }
+                    if seek_ready && (has_frame || force_render) {
+                        self.shared
+                            .awaiting_seek_frame
+                            .store(false, Ordering::Relaxed);
+                        self.shared.seek_restarted.store(false, Ordering::Relaxed);
+                    }
+                    mpv_render_context_report_swap(self.render);
+                }
+            }
+        }
+        if let Some(texture) = &self.sw_texture {
+            ui.painter().image(
+                texture.id(),
+                rect,
+                Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                egui::Color32::WHITE,
+            );
         }
     }
 
@@ -765,6 +841,81 @@ unsafe extern "C" fn on_mpv_update(ctx: *mut c_void) {
     }
     let context = &*(ctx as *const egui::Context);
     context.request_repaint();
+}
+
+unsafe fn create_opengl_render(
+    handle: *mut MpvHandle,
+    display: Option<DisplayHandle<'_>>,
+) -> anyhow::Result<*mut MpvRenderContext> {
+    let mut init = MpvOpenglInitParams {
+        get_proc_address: gl_get_proc_address,
+        get_proc_address_ctx: ptr::null_mut(),
+    };
+    let api = CString::new("opengl")?;
+    let mut display_param = MpvRenderParam {
+        type_: MPV_RENDER_PARAM_INVALID,
+        data: ptr::null_mut(),
+    };
+    if let Some(display) = display {
+        match display.as_raw() {
+            RawDisplayHandle::Wayland(wayland) => {
+                display_param.type_ = MPV_RENDER_PARAM_WL_DISPLAY;
+                display_param.data = wayland.display.as_ptr();
+            }
+            RawDisplayHandle::Xlib(xlib) => {
+                if let Some(display) = xlib.display {
+                    display_param.type_ = MPV_RENDER_PARAM_X11_DISPLAY;
+                    display_param.data = display.as_ptr();
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut params = [
+        MpvRenderParam {
+            type_: MPV_RENDER_PARAM_API_TYPE,
+            data: api.as_ptr().cast_mut().cast(),
+        },
+        MpvRenderParam {
+            type_: MPV_RENDER_PARAM_OPENGL_INIT_PARAMS,
+            data: (&mut init as *mut MpvOpenglInitParams).cast(),
+        },
+        display_param,
+        MpvRenderParam {
+            type_: MPV_RENDER_PARAM_INVALID,
+            data: ptr::null_mut(),
+        },
+    ];
+    let mut render = ptr::null_mut();
+    check(mpv_render_context_create(
+        &mut render,
+        handle,
+        params.as_mut_ptr(),
+    ))?;
+    Ok(render)
+}
+
+fn create_software_render(handle: *mut MpvHandle) -> anyhow::Result<*mut MpvRenderContext> {
+    let api = CString::new("sw")?;
+    let mut params = [
+        MpvRenderParam {
+            type_: MPV_RENDER_PARAM_API_TYPE,
+            data: api.as_ptr().cast_mut().cast(),
+        },
+        MpvRenderParam {
+            type_: MPV_RENDER_PARAM_INVALID,
+            data: ptr::null_mut(),
+        },
+    ];
+    let mut render = ptr::null_mut();
+    unsafe {
+        check(mpv_render_context_create(
+            &mut render,
+            handle,
+            params.as_mut_ptr(),
+        ))?;
+    }
+    Ok(render)
 }
 
 fn paint_video(

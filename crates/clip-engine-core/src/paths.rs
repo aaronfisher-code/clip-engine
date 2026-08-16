@@ -45,7 +45,7 @@ impl AppPaths {
                     PathBuf::from("ffprobe")
                 }
             });
-        let value = Self {
+        let mut value = Self {
             database: data.join("clip-engine.sqlite3"),
             source,
             previews: data.join("previews"),
@@ -55,7 +55,10 @@ impl AppPaths {
             ffprobe,
         };
         std::fs::create_dir_all(&value.data)?;
-        std::fs::create_dir_all(&value.source)?;
+        if std::fs::create_dir_all(&value.source).is_err() {
+            value.source = value.data.join("Inbox");
+            std::fs::create_dir_all(&value.source)?;
+        }
         std::fs::create_dir_all(&value.previews)?;
         std::fs::create_dir_all(&value.exports)?;
         Ok(value)
