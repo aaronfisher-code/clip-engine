@@ -17,6 +17,7 @@ fn embed_windows_icon() {
         resource.set_icon("assets/clip-engine.ico");
         resource.set("ProductName", "Dabs Clip Engine");
         resource.set("FileDescription", "Dabs Clip Engine");
+        resource.set("CompanyName", "Dab");
         resource
             .compile()
             .expect("embed the Dabs Clip Engine Windows icon");

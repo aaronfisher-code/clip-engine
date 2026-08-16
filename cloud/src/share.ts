@@ -25,6 +25,11 @@ function formatDuration(seconds: number) {
   return `${minutes}:${(rounded % 60).toString().padStart(2, "0")}`;
 }
 
+function formatQuality(width: number, height: number, fps: number) {
+  const lines = Math.round(Math.min(width, height) || height || width);
+  return `${lines}p${Math.round(fps)}`;
+}
+
 function formatDate(value: string) {
   return new Date(value).toLocaleDateString("en-AU", {
     day: "numeric",
@@ -42,7 +47,8 @@ export function sharePage(clip: SharePageDetails) {
   const mediaUrl = escapeHtml(clip.mediaUrl);
   const thumbnailUrl = escapeHtml(clip.thumbnailUrl);
   const duration = formatDuration(clip.duration);
-  const technicalDetails = `${duration} · ${clip.width}×${clip.height} · ${Math.round(clip.fps)} FPS`;
+  const quality = formatQuality(clip.width, clip.height, clip.fps);
+  const technicalDetails = `${duration} · ${quality}`;
   const description = escapeHtml(`${technicalDetails} · by ${clip.uploaderName}`);
   const published = escapeHtml(formatDate(clip.publishedAt));
   const expires = escapeHtml(formatDate(clip.expiresAt));
@@ -131,7 +137,7 @@ export function sharePage(clip: SharePageDetails) {
         <div>
           <span class="eyebrow">Published by ${uploaderName}</span>
           <h1>${title}</h1>
-          <div class="meta"><span>${duration}</span><span>${clip.width}×${clip.height}</span><span>${Math.round(clip.fps)} FPS</span><span class="author">${uploaderName}</span><span>${published}</span><span>Expires ${expires}</span></div>
+          <div class="meta"><span>${duration}</span><span>${quality}</span><span class="author">${uploaderName}</span><span>${published}</span><span>Expires ${expires}</span></div>
         </div>
         <div class="actions">
           <a href="${mediaUrl}" download>Download</a>

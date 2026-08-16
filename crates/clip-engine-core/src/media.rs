@@ -2,10 +2,24 @@ use crate::models::{AudioTrack, Clip, ExportProfile, ProbeResult, Selection};
 use crate::paths::AppPaths;
 use anyhow::{bail, Context};
 use chrono::{DateTime, Utc};
+use std::ffi::OsStr;
 use std::path::Path;
 use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::process::Command;
+
+/// Windows console apps like FFmpeg flash an empty terminal unless this flag is set.
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+fn hidden_command(program: impl AsRef<OsStr>) -> Command {
+    let mut command = Command::new(program);
+    #[cfg(windows)]
+    {
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    command
+}
 
 fn rate(value: Option<&str>) -> f64 {
     let mut parts = value
@@ -26,7 +40,7 @@ pub async fn probe(
     source: &Path,
     display_name: Option<String>,
 ) -> anyhow::Result<Clip> {
-    let output = Command::new(&paths.ffprobe)
+    let output = hidden_command(&paths.ffprobe)
         .args([
             "-v",
             "error",
@@ -126,7 +140,7 @@ pub async fn probe(
 }
 
 async fn run(paths: &AppPaths, args: &[String]) -> anyhow::Result<()> {
-    let output = Command::new(&paths.ffmpeg)
+    let output = hidden_command(&paths.ffmpeg)
         .args(args)
         .output()
         .await
@@ -585,7 +599,7 @@ pub async fn export_clip<F>(
 where
     F: FnMut(f64) + Send,
 {
-    let mut child = Command::new(&paths.ffmpeg)
+    let mut child = hidden_command(&paths.ffmpeg)
         .args(export_args(
             source, output, selection, profile, encoder, quality,
         ))
@@ -642,7 +656,7 @@ pub async fn make_thumbnail(
 
 pub async fn detect_encoder(paths: &AppPaths) -> String {
     for encoder in ["h264_nvenc", "h264_qsv", "h264_amf"] {
-        let output = Command::new(&paths.ffmpeg)
+        let output = hidden_command(&paths.ffmpeg)
             .args([
                 "-hide_banner",
                 "-loglevel",

@@ -34,7 +34,7 @@ winresource = "0.1"
 [package.metadata.packager]
 product-name = "Dabs Clip Engine"
 identifier = "dev.dab.clip-engine"
-publisher = "Dabs"
+publisher = "Dab"
 category = "Video"
 out-dir = "../../dist/desktop"
 before-packaging-command = "cargo build -p clip-engine --release --bin clip-engine"
