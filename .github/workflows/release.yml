@@ -183,7 +183,7 @@ jobs:
           CARGO_TARGET_DIR: ${{ github.workspace }}/target
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: cargo packager -p clip-engine --release --formats ${{ matrix.formats }}
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: desktop-${{ matrix.platform }}
           path: dist/desktop/**
