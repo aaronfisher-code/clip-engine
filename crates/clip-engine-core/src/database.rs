@@ -359,7 +359,9 @@ mod tests {
                 .as_deref(),
             Some("Game")
         );
-        database.put_setting("source_directory", "/videos/inbox").unwrap();
+        database
+            .put_setting("source_directory", "/videos/inbox")
+            .unwrap();
         assert_eq!(
             database.setting("source_directory").unwrap().as_deref(),
             Some("/videos/inbox")

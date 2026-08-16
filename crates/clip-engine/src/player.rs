@@ -320,7 +320,9 @@ impl Player {
         self.load_started = Some(Instant::now());
         self.shared.pending_play.store(false, Ordering::Relaxed);
         self.shared.awaiting_frame.store(true, Ordering::SeqCst);
-        self.shared.awaiting_seek_frame.store(false, Ordering::Relaxed);
+        self.shared
+            .awaiting_seek_frame
+            .store(false, Ordering::Relaxed);
         self.shared.seek_restarted.store(false, Ordering::Relaxed);
         self.request_redraw();
         Ok(())
@@ -350,10 +352,14 @@ impl Player {
     }
 
     pub fn unload(&mut self) {
-        self.shared.resume_after_seek.store(false, Ordering::Relaxed);
+        self.shared
+            .resume_after_seek
+            .store(false, Ordering::Relaxed);
         self.shared.pending_play.store(false, Ordering::Relaxed);
         self.shared.awaiting_frame.store(false, Ordering::SeqCst);
-        self.shared.awaiting_seek_frame.store(false, Ordering::Relaxed);
+        self.shared
+            .awaiting_seek_frame
+            .store(false, Ordering::Relaxed);
         self.shared.seek_restarted.store(false, Ordering::Relaxed);
         let _ = set_property(self.handle, "pause", "yes");
         let _ = command(self.handle, &["stop"]);
@@ -390,7 +396,9 @@ impl Player {
     }
 
     pub fn pause(&self) {
-        self.shared.resume_after_seek.store(false, Ordering::Relaxed);
+        self.shared
+            .resume_after_seek
+            .store(false, Ordering::Relaxed);
         self.shared.pending_play.store(false, Ordering::Relaxed);
         self.set_playback_sync(false);
         let _ = set_property(self.handle, "pause", "yes");
@@ -506,7 +514,9 @@ impl Player {
                             };
                             self.error = Some(message);
                             self.shared.awaiting_frame.store(false, Ordering::SeqCst);
-                            self.shared.awaiting_seek_frame.store(false, Ordering::Relaxed);
+                            self.shared
+                                .awaiting_seek_frame
+                                .store(false, Ordering::Relaxed);
                             self.shared.seek_restarted.store(false, Ordering::Relaxed);
                             self.shared.pending_play.store(false, Ordering::Relaxed);
                             self.seek_in_flight = false;
@@ -549,7 +559,9 @@ impl Player {
         if self.shared.awaiting_seek_frame.load(Ordering::Relaxed)
             && self.last_seek.elapsed() > Duration::from_millis(1000)
         {
-            self.shared.awaiting_seek_frame.store(false, Ordering::Relaxed);
+            self.shared
+                .awaiting_seek_frame
+                .store(false, Ordering::Relaxed);
             self.shared.seek_restarted.store(false, Ordering::Relaxed);
         }
         let Some(time) = self.pending_seek else {
@@ -747,7 +759,10 @@ fn paint_video(
     let gl = painter.gl();
     unsafe {
         let window_fbo = gl.get_parameter_i32(glow::FRAMEBUFFER_BINDING);
-        let mut target = shared.target.lock().unwrap_or_else(|error| error.into_inner());
+        let mut target = shared
+            .target
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let recreate = target
             .as_ref()
             .is_none_or(|current| current.width != width || current.height != height);
@@ -769,8 +784,16 @@ fn paint_video(
                 glow::UNSIGNED_BYTE,
                 glow::PixelUnpackData::Slice(None),
             );
-            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::LINEAR as i32);
-            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::LINEAR as i32);
+            gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_MIN_FILTER,
+                glow::LINEAR as i32,
+            );
+            gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_MAG_FILTER,
+                glow::LINEAR as i32,
+            );
             gl.tex_parameter_i32(
                 glow::TEXTURE_2D,
                 glow::TEXTURE_WRAP_S,

@@ -2,8 +2,8 @@ use crate::player::Player;
 use crate::theme;
 use clip_engine_core::cloud::{AccessRequest, AdminUser, CloudClip, CloudUser, PasswordReset};
 use clip_engine_core::models::{AppConfig, Clip, PublishJob, Selection};
-use clip_engine_core::paths::{default_inbox_dir, path_is_within};
-use clip_engine_core::{format_file_size, publish_options, Engine, PublishOption};
+use clip_engine_core::paths::{default_inbox_dir, path_is_within, video_dir};
+use clip_engine_core::{export_options, format_file_size, safe_base_name, Engine, PublishOption};
 use eframe::egui::{
     self, Align, Color32, ColorImage, CornerRadius, CursorIcon, Layout, Pos2, Rect, RichText,
     Sense, StrokeKind, TextureHandle, TextureOptions, Ui, UiBuilder, Vec2,
@@ -39,6 +39,8 @@ enum Message {
     Admin(Vec<AdminUser>, Vec<AccessRequest>),
     PasswordReset(PasswordReset),
     Busy(bool),
+    ExportProgress(f64),
+    ExportDone(PathBuf),
 }
 
 struct EditorState {
@@ -84,6 +86,17 @@ enum PublishModal {
     },
 }
 
+#[derive(Clone)]
+enum ExportModal {
+    Working {
+        quality_label: String,
+        progress: f64,
+    },
+    Done {
+        path: PathBuf,
+    },
+}
+
 pub struct ClipApp {
     engine: Engine,
     player: Option<Player>,
@@ -104,7 +117,9 @@ pub struct ClipApp {
     access_query: String,
     created_reset: Option<PasswordReset>,
     pending_delete_job: Option<String>,
+    pending_delete_clip: Option<String>,
     publish_modal: Option<PublishModal>,
+    export_modal: Option<ExportModal>,
     editor: Option<EditorState>,
     thumbs: HashMap<String, TextureHandle>,
     notice: Option<String>,
@@ -126,6 +141,7 @@ pub struct ClipApp {
     session_media: Option<String>,
     timeline_drag: Option<TimelineDrag>,
     time_edit: Option<TimeEdit>,
+    drop_hovering: bool,
 }
 
 impl ClipApp {
@@ -163,11 +179,8 @@ impl ClipApp {
             }
         }
         let clips = engine.clips().unwrap_or(clips);
-        let player = match Player::new(
-            &cc.egui_ctx,
-            cc.get_proc_address,
-            cc.display_handle().ok(),
-        ) {
+        let player = match Player::new(&cc.egui_ctx, cc.get_proc_address, cc.display_handle().ok())
+        {
             Ok(player) => Some(player),
             Err(error) => {
                 return Self {
@@ -191,7 +204,9 @@ impl ClipApp {
                     access_query: String::new(),
                     created_reset: None,
                     pending_delete_job: None,
+                    pending_delete_clip: None,
                     publish_modal: None,
+                    export_modal: None,
                     editor: None,
                     thumbs: HashMap::new(),
                     notice: None,
@@ -212,6 +227,7 @@ impl ClipApp {
                     session_media: None,
                     timeline_drag: None,
                     time_edit: None,
+                    drop_hovering: false,
                 };
             }
         };
@@ -235,7 +251,9 @@ impl ClipApp {
             access_query: String::new(),
             created_reset: None,
             pending_delete_job: None,
+            pending_delete_clip: None,
             publish_modal: None,
+            export_modal: None,
             editor: None,
             thumbs: HashMap::new(),
             notice: None,
@@ -257,6 +275,7 @@ impl ClipApp {
             session_media: None,
             timeline_drag: None,
             time_edit: None,
+            drop_hovering: false,
         };
         app.bootstrap_session();
         app.ensure_valid_selection();
@@ -361,6 +380,9 @@ impl ClipApp {
                 Message::Error(value) => {
                     self.set_error(value);
                     self.busy = false;
+                    if matches!(self.export_modal, Some(ExportModal::Working { .. })) {
+                        self.export_modal = None;
+                    }
                 }
                 Message::Notice(value) => {
                     self.set_notice(value);
@@ -404,6 +426,18 @@ impl ClipApp {
                     self.busy = false;
                 }
                 Message::Busy(busy) => self.busy = busy,
+                Message::ExportProgress(progress) => {
+                    if let Some(ExportModal::Working {
+                        progress: current, ..
+                    }) = &mut self.export_modal
+                    {
+                        *current = progress;
+                    }
+                }
+                Message::ExportDone(path) => {
+                    self.export_modal = Some(ExportModal::Done { path });
+                    self.busy = false;
+                }
             }
         }
     }
@@ -499,16 +533,20 @@ impl eframe::App for ClipApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.pump();
         self.expire_toasts(ctx);
-        let previewing = self.clips.iter().any(|clip| {
-            matches!(clip.preview_status.as_str(), "pending" | "processing")
-        });
+        let previewing = self
+            .clips
+            .iter()
+            .any(|clip| matches!(clip.preview_status.as_str(), "pending" | "processing"));
         let processing = previewing
-            || self.jobs.iter().any(|job| {
-                matches!(job.status.as_str(), "queued" | "transcoding" | "uploading")
-            });
-        let refresh_every = if self.jobs.iter().any(|job| {
-            matches!(job.status.as_str(), "queued" | "transcoding" | "uploading")
-        }) {
+            || self
+                .jobs
+                .iter()
+                .any(|job| matches!(job.status.as_str(), "queued" | "transcoding" | "uploading"));
+        let refresh_every = if self
+            .jobs
+            .iter()
+            .any(|job| matches!(job.status.as_str(), "queued" | "transcoding" | "uploading"))
+        {
             Duration::from_millis(200)
         } else {
             Duration::from_millis(900)
@@ -518,6 +556,10 @@ impl eframe::App for ClipApp {
             self.last_refresh = Instant::now();
         }
         if processing {
+            ctx.request_repaint();
+        }
+        self.ingest_dropped_files(ctx);
+        if self.drop_hovering {
             ctx.request_repaint();
         }
 
@@ -637,16 +679,7 @@ impl eframe::App for ClipApp {
                                 .color(theme::MUTED),
                             );
                             ui.add_space(12.0);
-                            if ui
-                                .add(
-                                    egui::Button::new(
-                                        RichText::new("Import your first recording")
-                                            .color(theme::INK)
-                                            .family(theme::medium()),
-                                    )
-                                    .fill(theme::ACCENT),
-                                )
-                                .clicked()
+                            if theme::import_drop_zone(ui, self.drop_hovering, 84.0).clicked()
                             {
                                 self.import_recordings();
                             }
@@ -670,15 +703,28 @@ impl eframe::App for ClipApp {
         if self.pending_delete_job.is_some() {
             self.delete_version_modal(ctx);
         }
+        if self.pending_delete_clip.is_some() {
+            self.delete_clip_modal(ctx);
+        }
         if self.publish_modal.is_some() {
             self.publish_flow_modal(ctx);
+        }
+        if self.export_modal.is_some() {
+            self.export_flow_modal(ctx);
+        }
+
+        if self.drop_hovering {
+            theme::window_drop_overlay(ctx);
         }
 
         self.stop_at_out_point();
 
-        if self.player.as_ref().is_some_and(|player| {
-            player.playing() || player.buffering() || player.wants_redraw()
-        }) {
+        if self
+            .player
+            .as_ref()
+            .is_some_and(|player| player.playing() || player.buffering() || player.wants_redraw())
+            || matches!(self.export_modal, Some(ExportModal::Working { .. }))
+        {
             ctx.request_repaint();
         }
     }
@@ -764,16 +810,21 @@ impl ClipApp {
 
     fn library_panel(&mut self, ui: &mut Ui) {
         ui.horizontal(|ui| {
-            ui.label(
-                RichText::new("Library")
-                    .family(theme::medium())
-                    .size(18.0),
-            );
+            ui.label(RichText::new("Library").family(theme::medium()).size(18.0));
             ui.label(
                 RichText::new(format!("{} clips", self.clips.len()))
                     .color(theme::MUTED)
                     .size(12.0),
             );
+        });
+        ui.add_space(8.0);
+        if theme::import_drop_zone(ui, self.drop_hovering, 72.0).clicked() {
+            self.import_recordings();
+        }
+        ui.add_space(8.0);
+        ui.label(RichText::new("Inbox folder").color(theme::MUTED).size(11.5));
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if ui.button("Scan").clicked() {
                     let engine = self.engine.clone();
@@ -782,48 +833,9 @@ impl ClipApp {
                         Ok(Message::Refresh)
                     });
                 }
-            });
-        });
-        ui.add_space(8.0);
-        if ui
-            .add_sized(
-                [ui.available_width(), 36.0],
-                egui::Button::new(
-                    RichText::new("Import recordings")
-                        .color(theme::INK)
-                        .family(theme::medium()),
-                )
-                .fill(theme::ACCENT),
-            )
-            .clicked()
-        {
-            self.import_recordings();
-        }
-        ui.add_space(8.0);
-        ui.label(
-            RichText::new("Inbox folder")
-                .color(theme::MUTED)
-                .size(11.5),
-        );
-        ui.add_space(4.0);
-        ui.horizontal(|ui| {
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if ui.button("Choose folder").clicked() {
-                    self.pick_inbox_folder();
-                }
                 let path = self.config.source_directory.clone();
-                let path_response = ui
-                    .add(
-                        egui::Label::new(
-                            RichText::new(path.clone())
-                                .small()
-                                .color(theme::MUTED)
-                                .italics(),
-                        )
-                        .truncate()
-                        .sense(Sense::click()),
-                    )
-                    .on_hover_text(&path);
+                let path_response =
+                    theme::folder_path_field(ui, &path).on_hover_cursor(CursorIcon::PointingHand);
                 if path_response.clicked() {
                     self.pick_inbox_folder();
                 }
@@ -862,8 +874,7 @@ impl ClipApp {
         } else {
             theme::PANEL
         };
-        ui.painter()
-            .rect_filled(rect, CornerRadius::same(6), fill);
+        ui.painter().rect_filled(rect, CornerRadius::same(6), fill);
         ui.painter().rect_stroke(
             rect,
             CornerRadius::same(6),
@@ -872,10 +883,7 @@ impl ClipApp {
         );
         if selected {
             ui.painter().rect_filled(
-                Rect::from_min_max(
-                    rect.left_top(),
-                    Pos2::new(rect.left() + 3.0, rect.bottom()),
-                ),
+                Rect::from_min_max(rect.left_top(), Pos2::new(rect.left() + 3.0, rect.bottom())),
                 CornerRadius::ZERO,
                 theme::ACCENT,
             );
@@ -994,6 +1002,33 @@ impl ClipApp {
         }
     }
 
+    fn ingest_dropped_files(&mut self, ctx: &egui::Context) {
+        self.drop_hovering = files_being_dropped(ctx);
+        let dropped = ctx.input(|input| {
+            input
+                .raw
+                .dropped_files
+                .iter()
+                .filter_map(|file| {
+                    file.path
+                        .clone()
+                        .or_else(|| (!file.name.is_empty()).then(|| PathBuf::from(&file.name)))
+                })
+                .collect::<Vec<_>>()
+        });
+        if dropped.is_empty() {
+            return;
+        }
+        let files = collect_import_paths(dropped);
+        if files.is_empty() {
+            self.set_error(
+                "Drop a video recording (mkv, mp4, mov, webm, avi, or m4v).".to_string(),
+            );
+            return;
+        }
+        self.import_paths(files);
+    }
+
     fn import_recordings(&mut self) {
         let files = rfd::FileDialog::new()
             .add_filter(
@@ -1002,12 +1037,19 @@ impl ClipApp {
             )
             .pick_files();
         if let Some(files) = files {
-            let engine = self.engine.clone();
-            self.run_async(async move {
-                engine.import_clips(files).await?;
-                Ok(Message::Refresh)
-            });
+            self.import_paths(files);
         }
+    }
+
+    fn import_paths(&mut self, files: Vec<PathBuf>) {
+        if files.is_empty() {
+            return;
+        }
+        let engine = self.engine.clone();
+        self.run_async(async move {
+            engine.import_clips(files).await?;
+            Ok(Message::Refresh)
+        });
     }
 
     fn bind_session_media(&mut self, media: Option<String>) {
@@ -1048,7 +1090,11 @@ impl ClipApp {
     }
 
     fn toggle_playback(&mut self) {
-        if self.player.as_ref().is_some_and(|player| player.wants_to_play()) {
+        if self
+            .player
+            .as_ref()
+            .is_some_and(|player| player.wants_to_play())
+        {
             if let Some(player) = &self.player {
                 player.pause();
             }
@@ -1058,7 +1104,11 @@ impl ClipApp {
     }
 
     fn request_play(&mut self) {
-        if self.player.as_ref().is_some_and(|player| player.wants_to_play()) {
+        if self
+            .player
+            .as_ref()
+            .is_some_and(|player| player.wants_to_play())
+        {
             return;
         }
         self.start_playback();
@@ -1105,7 +1155,10 @@ impl ClipApp {
     }
 
     fn seek_preserving_play_state(&mut self, time: f64) {
-        let playing = self.player.as_ref().is_some_and(|player| player.wants_to_play());
+        let playing = self
+            .player
+            .as_ref()
+            .is_some_and(|player| player.wants_to_play());
         self.activate_player(playing);
         if let Some(player) = &mut self.player {
             if playing {
@@ -1117,12 +1170,19 @@ impl ClipApp {
     }
 
     fn seek_to_clip_start(&mut self) {
-        let start = self.editor.as_ref().map(|editor| editor.start).unwrap_or(0.0);
+        let start = self
+            .editor
+            .as_ref()
+            .map(|editor| editor.start)
+            .unwrap_or(0.0);
         self.seek_preserving_play_state(start);
     }
 
     fn trim_time_value(&mut self, ui: &mut Ui, field: TimeField, displayed: &str, duration: f64) {
-        let editing = self.time_edit.as_ref().is_some_and(|edit| edit.field == field);
+        let editing = self
+            .time_edit
+            .as_ref()
+            .is_some_and(|edit| edit.field == field);
         let (rect, _) = ui.allocate_exact_size(Vec2::new(100.0, 28.0), Sense::hover());
         ui.scope_builder(UiBuilder::new().max_rect(rect), |ui| {
             ui.centered_and_justified(|ui| {
@@ -1187,7 +1247,11 @@ impl ClipApp {
             ui.ctx().set_cursor_icon(CursorIcon::Text);
         }
         if response.clicked() || response.double_clicked() {
-            if self.time_edit.as_ref().is_some_and(|edit| edit.field != field) {
+            if self
+                .time_edit
+                .as_ref()
+                .is_some_and(|edit| edit.field != field)
+            {
                 self.commit_time_edit(duration);
             }
             self.time_edit = Some(TimeEdit {
@@ -1229,7 +1293,7 @@ impl ClipApp {
             .as_ref()
             .is_none_or(|editor| editor.clip_id != clip.id)
         {
-            let options = publish_options(
+            let options = export_options(
                 clip.width,
                 clip.height,
                 clip.fps,
@@ -1321,58 +1385,65 @@ impl ClipApp {
                             ui.set_width(inspector_w);
                             ui.set_min_height(size.y);
                             ui.set_max_height(size.y);
-                            self.editor_inspector(ui, clip, &jobs);
+                            self.editor_inspector(ui, clip, &jobs, true);
                         },
                     );
                 });
             });
         } else {
             let stage_h = (size.y * 0.64).clamp(260.0, (size.y - 220.0).max(260.0));
-            ui.allocate_ui_with_layout(
-                Vec2::new(size.x, stage_h),
-                Layout::top_down(Align::Min),
-                |ui| {
-                    ui.set_width(size.x);
-                    ui.set_min_height(stage_h);
-                    self.editor_stage(ui, ctx, clip);
-                },
-            );
-            ui.add_space(10.0);
-            self.editor_inspector(ui, clip, &jobs);
+            egui::ScrollArea::vertical()
+                .id_salt("editor-page")
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    let width = ui.available_width();
+                    ui.set_width(width);
+                    ui.allocate_ui_with_layout(
+                        Vec2::new(width, stage_h),
+                        Layout::top_down(Align::Min),
+                        |ui| {
+                            ui.set_width(width);
+                            ui.set_min_height(stage_h);
+                            self.editor_stage(ui, ctx, clip);
+                        },
+                    );
+                    ui.add_space(10.0);
+                    self.editor_inspector(ui, clip, &jobs, false);
+                });
         }
 
         let time = self.playback_time();
         if !ctx.wants_keyboard_input() {
             ui.input(|input| {
-            if input.key_pressed(egui::Key::Space) {
-                self.toggle_playback();
-            }
-            if input.key_pressed(egui::Key::ArrowLeft) {
-                let delta = if input.modifiers.shift {
-                    -1.0
-                } else {
-                    -frame_step
-                };
-                self.step_frame(delta);
-            }
-            if input.key_pressed(egui::Key::ArrowRight) {
-                let delta = if input.modifiers.shift {
-                    1.0
-                } else {
-                    frame_step
-                };
-                self.step_frame(delta);
-            }
-            if input.key_pressed(egui::Key::I) {
-                if let Some(editor) = &mut self.editor {
-                    editor.start = time.min(editor.end - 0.05).max(0.0);
+                if input.key_pressed(egui::Key::Space) {
+                    self.toggle_playback();
                 }
-            }
-            if input.key_pressed(egui::Key::O) {
-                if let Some(editor) = &mut self.editor {
-                    editor.end = time.max(editor.start + 0.05).min(clip.duration);
+                if input.key_pressed(egui::Key::ArrowLeft) {
+                    let delta = if input.modifiers.shift {
+                        -1.0
+                    } else {
+                        -frame_step
+                    };
+                    self.step_frame(delta);
                 }
-            }
+                if input.key_pressed(egui::Key::ArrowRight) {
+                    let delta = if input.modifiers.shift {
+                        1.0
+                    } else {
+                        frame_step
+                    };
+                    self.step_frame(delta);
+                }
+                if input.key_pressed(egui::Key::I) {
+                    if let Some(editor) = &mut self.editor {
+                        editor.start = time.min(editor.end - 0.05).max(0.0);
+                    }
+                }
+                if input.key_pressed(egui::Key::O) {
+                    if let Some(editor) = &mut self.editor {
+                        editor.end = time.max(editor.start + 0.05).min(clip.duration);
+                    }
+                }
             });
         }
     }
@@ -1395,27 +1466,21 @@ impl ClipApp {
                 .editor
                 .as_ref()
                 .map(|editor| (format_time(editor.start), format_time(editor.end)));
-            let button_w = 140.0_f32.min((row.width() * 0.28).max(1.0));
-            let left = Rect::from_min_max(
-                row.min,
-                Pos2::new(row.left() + button_w, row.bottom()),
-            );
-            let right = Rect::from_min_max(
-                Pos2::new(row.right() - button_w, row.top()),
-                row.max,
-            );
+            let button_w = 156.0_f32.min((row.width() * 0.32).max(1.0));
+            let left = Rect::from_min_max(row.min, Pos2::new(row.left() + button_w, row.bottom()));
+            let right = Rect::from_min_max(Pos2::new(row.right() - button_w, row.top()), row.max);
             let center = Rect::from_min_max(
                 Pos2::new(left.right(), row.top()),
                 Pos2::new(right.left(), row.bottom()),
             );
             ui.scope_builder(UiBuilder::new().max_rect(left), |ui| {
                 ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                    mark_in = ui.button("I  Mark in").clicked();
+                    mark_in = theme::hotkey_button(ui, "I", "Mark start", true).clicked();
                 });
             });
             ui.scope_builder(UiBuilder::new().max_rect(right), |ui| {
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    mark_out = ui.button("O  Mark out").clicked();
+                    mark_out = theme::hotkey_button(ui, "O", "Mark end", false).clicked();
                 });
             });
             if let Some((start, end)) = times {
@@ -1428,7 +1493,8 @@ impl ClipApp {
                             ui.add_space(pad);
                         }
                         self.trim_time_value(ui, TimeField::In, &start, clip.duration);
-                        let (arrow, _) = ui.allocate_exact_size(Vec2::new(24.0, 28.0), Sense::hover());
+                        let (arrow, _) =
+                            ui.allocate_exact_size(Vec2::new(24.0, 28.0), Sense::hover());
                         ui.painter().text(
                             arrow.center(),
                             egui::Align2::CENTER_CENTER,
@@ -1499,8 +1565,14 @@ impl ClipApp {
             .player
             .as_ref()
             .is_some_and(|player| player.loaded_path().is_some());
-        let show_video = self.player.as_ref().is_some_and(|player| player.has_video());
-        let buffering = self.player.as_ref().is_some_and(|player| player.buffering());
+        let show_video = self
+            .player
+            .as_ref()
+            .is_some_and(|player| player.has_video());
+        let buffering = self
+            .player
+            .as_ref()
+            .is_some_and(|player| player.buffering());
         if let Some(player) = &mut self.player {
             if loaded {
                 player.pump_events();
@@ -1562,16 +1634,16 @@ impl ClipApp {
         let time = self.playback_time();
         let (display_time, display_duration) = if let Some(editor) = &self.editor {
             let length = (editor.end - editor.start).max(0.0);
-            (
-                (time - editor.start).clamp(0.0, length),
-                length,
-            )
+            ((time - editor.start).clamp(0.0, length), length)
         } else {
             (time, duration)
         };
         theme::inset().show(ui, |ui| {
             ui.horizontal(|ui| {
-                let playing = self.player.as_ref().is_some_and(|player| player.wants_to_play());
+                let playing = self
+                    .player
+                    .as_ref()
+                    .is_some_and(|player| player.wants_to_play());
                 if theme::transport_icon_button(
                     ui,
                     Vec2::new(36.0, 36.0),
@@ -1625,13 +1697,10 @@ impl ClipApp {
         });
     }
 
-    fn editor_inspector(&mut self, ui: &mut Ui, clip: &Clip, jobs: &[PublishJob]) {
-        let column_width = ui.available_width();
-        egui::ScrollArea::vertical()
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                ui.set_width(column_width);
-                ui.with_layout(Layout::top_down_justified(Align::Min), |ui| {
+    fn editor_inspector(&mut self, ui: &mut Ui, clip: &Clip, jobs: &[PublishJob], scroll: bool) {
+        let mut add_contents = |ui: &mut Ui| {
+            ui.set_width(ui.available_width());
+            ui.with_layout(Layout::top_down_justified(Align::Min), |ui| {
                 theme::card().show(ui, |ui| {
                     ui.set_width(ui.available_width());
                     ui.label(RichText::new("Audio mix").family(theme::medium()).size(14.5));
@@ -1679,17 +1748,17 @@ impl ClipApp {
                 ui.add_space(10.0);
                 theme::card().show(ui, |ui| {
                     ui.set_width(ui.available_width());
-                    ui.label(RichText::new("Publish").family(theme::medium()).size(14.5));
+                    ui.label(RichText::new("Export").family(theme::medium()).size(14.5));
                     ui.label(
                         RichText::new(
-                            "Share links expire in 30 days. Qualities over 200 MB are hidden.",
+                            "Save a local file any time. Publishing a share link needs an account, and those links expire in 30 days.",
                         )
                         .color(theme::MUTED)
                         .size(12.0),
                     );
                     ui.add_space(8.0);
                     let options = self.editor.as_ref().map(|editor| {
-                        publish_options(
+                        export_options(
                             clip.width,
                             clip.height,
                             clip.fps,
@@ -1721,7 +1790,7 @@ impl ClipApp {
                         if options.is_empty() {
                             ui.label(
                                 RichText::new(
-                                    "This selection is too long to stay under 200 MB, even at 720p30. Shorten the trim.",
+                                    "No export qualities are available for this selection.",
                                 )
                                 .color(theme::DANGER)
                                 .size(12.0),
@@ -1779,23 +1848,38 @@ impl ClipApp {
                                         .size(12.0),
                                     );
                                 }
+                                if !option.within_publish_limit() {
+                                    ui.label(
+                                        RichText::new(
+                                            "This quality is over 200 MB, so it can be saved locally but not published.",
+                                        )
+                                        .color(theme::ACCENT)
+                                        .size(12.0),
+                                    );
+                                }
                             }
                         }
                     }
                     ui.add_space(8.0);
-                    let can_publish = self.config.authenticated
-                        && !self.busy
+                    let can_export = !self.busy
                         && selected.is_some()
-                        && self.publish_modal.is_none();
-                    let button_label = selected
-                        .map(|option| format!("Publish {}", option.quality_label()))
-                        .unwrap_or_else(|| "Publish".into());
-                    if ui
-                        .add_enabled(
+                        && self.publish_modal.is_none()
+                        && self.export_modal.is_none();
+                    let can_publish = can_export
+                        && self.config.authenticated
+                        && selected.is_some_and(PublishOption::within_publish_limit);
+                    ui.horizontal(|ui| {
+                        let gap = ui.spacing().item_spacing.x;
+                        let button_width = ((ui.available_width() - gap) / 2.0).max(0.0);
+                        let mut publish_response = ui.add_enabled(
                             can_publish,
                             egui::Button::new(
-                                RichText::new(button_label)
-                                    .color(theme::INK)
+                                RichText::new("Publish")
+                                    .color(if can_publish {
+                                        theme::INK
+                                    } else {
+                                        theme::TEXT
+                                    })
                                     .family(theme::medium()),
                             )
                             .fill(if can_publish {
@@ -1803,25 +1887,74 @@ impl ClipApp {
                             } else {
                                 theme::LINE
                             })
-                            .min_size(Vec2::new(ui.available_width(), 32.0)),
-                        )
-                        .clicked()
-                    {
-                        if let (Some(editor), Some(option)) = (&self.editor, selected) {
-                            self.publish_modal = Some(PublishModal::Name {
-                                clip_id: clip.id.clone(),
-                                title: default_clip_title(&clip.name),
-                                selection: Selection {
-                                    start: editor.start,
-                                    end: editor.end,
-                                    audio_stream_indexes: editor.tracks.clone(),
-                                    export: Some(option.profile()),
-                                },
-                                quality_label: option.quality_label(),
-                                focus_title: true,
-                            });
+                            .min_size(Vec2::new(button_width, 32.0)),
+                        );
+                        if !self.config.authenticated {
+                            publish_response =
+                                publish_response.on_hover_text("Sign in to publish a share link.");
+                        } else if selected.is_some_and(|option| !option.within_publish_limit()) {
+                            publish_response = publish_response.on_hover_text(
+                                "This quality is over 200 MB. Choose a lower quality or shorten the trim to publish.",
+                            );
                         }
-                    }
+                        if publish_response.clicked() {
+                            if let (Some(editor), Some(option)) = (&self.editor, selected) {
+                                self.publish_modal = Some(PublishModal::Name {
+                                    clip_id: clip.id.clone(),
+                                    title: default_clip_title(&clip.name),
+                                    selection: Selection {
+                                        start: editor.start,
+                                        end: editor.end,
+                                        audio_stream_indexes: editor.tracks.clone(),
+                                        export: Some(option.profile()),
+                                    },
+                                    quality_label: option.quality_label(),
+                                    focus_title: true,
+                                });
+                            }
+                        }
+                        if ui
+                            .add_enabled(
+                                can_export,
+                                egui::Button::new(
+                                    RichText::new("Export")
+                                        .color(if can_publish {
+                                            theme::TEXT
+                                        } else {
+                                            theme::INK
+                                        })
+                                        .family(theme::medium()),
+                                )
+                                .fill(if !can_export {
+                                    theme::LINE
+                                } else if can_publish {
+                                    theme::CARD_HOVER
+                                } else {
+                                    theme::ACCENT
+                                })
+                                .min_size(Vec2::new(button_width, 32.0)),
+                            )
+                            .clicked()
+                        {
+                            let export =
+                                self.editor.as_ref().zip(selected).map(|(editor, option)| {
+                                    (
+                                        clip.id.clone(),
+                                        clip.name.clone(),
+                                        Selection {
+                                            start: editor.start,
+                                            end: editor.end,
+                                            audio_stream_indexes: editor.tracks.clone(),
+                                            export: Some(option.profile()),
+                                        },
+                                        option.clone(),
+                                    )
+                                });
+                            if let Some((clip_id, clip_name, selection, option)) = export {
+                                self.start_local_export(clip_id, &clip_name, selection, &option);
+                            }
+                        }
+                    });
                     ui.add_space(6.0);
                     if ui
                         .add_sized(
@@ -1830,13 +1963,7 @@ impl ClipApp {
                         )
                         .clicked()
                     {
-                        let engine = self.engine.clone();
-                        let id = clip.id.clone();
-                        self.selected_id = None;
-                        self.run_async(async move {
-                            engine.delete_clip(&id).await?;
-                            Ok(Message::Refresh)
-                        });
+                        self.pending_delete_clip = Some(clip.id.clone());
                     }
                 });
                 let history = jobs
@@ -1895,7 +2022,14 @@ impl ClipApp {
                     }
                 }
                 });
-            });
+        };
+        if scroll {
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, add_contents);
+        } else {
+            add_contents(ui);
+        }
     }
 
     fn timeline(&mut self, ui: &mut Ui, duration: f64, time: f64) {
@@ -1910,9 +2044,8 @@ impl ClipApp {
         );
         let duration = duration.max(0.001);
         let x_for = |value: f64| rect.left() + (value / duration) as f32 * rect.width();
-        let time_at = |x: f32| {
-            (((x - rect.left()) / rect.width()).clamp(0.0, 1.0) as f64) * duration
-        };
+        let time_at =
+            |x: f32| (((x - rect.left()) / rect.width()).clamp(0.0, 1.0) as f64) * duration;
         let handle_hit = 14.0;
         let near_handle = |pos: Pos2, start: f64, end: f64| -> Option<TimelineDrag> {
             if pos.y < track.center().y {
@@ -1931,13 +2064,13 @@ impl ClipApp {
 
         ui.painter()
             .rect_filled(rect, CornerRadius::same(6), Color32::from_rgb(12, 13, 16));
-        ui.painter().rect_filled(
-            track,
-            CornerRadius::ZERO,
-            Color32::from_rgb(46, 51, 62),
-        );
+        ui.painter()
+            .rect_filled(track, CornerRadius::ZERO, Color32::from_rgb(46, 51, 62));
 
-        let selection = self.editor.as_ref().map(|editor| (editor.start, editor.end));
+        let selection = self
+            .editor
+            .as_ref()
+            .map(|editor| (editor.start, editor.end));
         if let Some((start, end)) = selection {
             let start_x = x_for(start).clamp(track.left(), track.right());
             let end_x = x_for(end).clamp(track.left(), track.right());
@@ -1961,7 +2094,7 @@ impl ClipApp {
                     Pos2::new(end_x, track.bottom()),
                 ),
                 CornerRadius::ZERO,
-                Color32::from_rgb(92, 70, 28),
+                theme::ACCENT.gamma_multiply(0.38),
             );
         }
         ui.painter().rect_stroke(
@@ -1998,9 +2131,9 @@ impl ClipApp {
             );
         }
 
-        let pointer = response.interact_pointer_pos().or_else(|| {
-            response.hover_pos().filter(|_| response.hovered())
-        });
+        let pointer = response
+            .interact_pointer_pos()
+            .or_else(|| response.hover_pos().filter(|_| response.hovered()));
         if let (Some(pos), Some((start, end))) = (pointer, selection) {
             if near_handle(pos, start, end).is_some()
                 || dragging == Some(TimelineDrag::In)
@@ -2012,9 +2145,8 @@ impl ClipApp {
 
         if response.drag_started() {
             self.time_edit = None;
-            let kind = pointer.and_then(|pos| {
-                selection.and_then(|(start, end)| near_handle(pos, start, end))
-            });
+            let kind = pointer
+                .and_then(|pos| selection.and_then(|(start, end)| near_handle(pos, start, end)));
             self.timeline_drag = kind.or(Some(TimelineDrag::Playhead));
         }
 
@@ -2025,11 +2157,12 @@ impl ClipApp {
         } else if response.clicked() {
             if let Some(pos) = response.interact_pointer_pos() {
                 let t = time_at(pos.x);
-                let handle = selection.and_then(|(start, end)| match near_handle(pos, start, end) {
-                    Some(TimelineDrag::In) => Some(start),
-                    Some(TimelineDrag::Out) => Some(end),
-                    _ => None,
-                });
+                let handle =
+                    selection.and_then(|(start, end)| match near_handle(pos, start, end) {
+                        Some(TimelineDrag::In) => Some(start),
+                        Some(TimelineDrag::Out) => Some(end),
+                        _ => None,
+                    });
                 if let Some(handle) = handle {
                     self.seek_preview(handle);
                 } else {
@@ -2426,21 +2559,18 @@ impl ClipApp {
         window.show(ctx, |ui| {
             ui.set_width(360.0);
             match &modal {
-                PublishModal::Name {
-                    quality_label,
-                    ..
-                } => {
+                PublishModal::Name { quality_label, .. } => {
                     ui.label(
-                        RichText::new(format!("Publishing {quality_label}. Share links expire in 30 days."))
-                            .color(theme::MUTED)
-                            .size(12.5),
+                        RichText::new(format!(
+                            "Publishing {quality_label}. Share links expire in 30 days."
+                        ))
+                        .color(theme::MUTED)
+                        .size(12.5),
                     );
                     ui.add_space(6.0);
                     ui.label("Clip name");
                     let PublishModal::Name {
-                        title,
-                        focus_title,
-                        ..
+                        title, focus_title, ..
                     } = self.publish_modal.as_mut().unwrap()
                     else {
                         return;
@@ -2595,6 +2725,192 @@ impl ClipApp {
         }
     }
 
+    fn start_local_export(
+        &mut self,
+        clip_id: String,
+        clip_name: &str,
+        selection: Selection,
+        option: &PublishOption,
+    ) {
+        let mut dialog = rfd::FileDialog::new()
+            .set_title("Export clip")
+            .add_filter("MP4 video", &["mp4"])
+            .set_file_name(format!(
+                "{}-{}.mp4",
+                safe_base_name(clip_name),
+                option.quality_label()
+            ));
+        if let Ok(videos) = video_dir() {
+            dialog = dialog.set_directory(videos);
+        }
+        let Some(path) = dialog.save_file() else {
+            return;
+        };
+        let output = ensure_mp4_path(path);
+        let quality_label = option.quality_label();
+        let engine = self.engine.clone();
+        let tx = self.tx.clone();
+        self.export_modal = Some(ExportModal::Working {
+            quality_label,
+            progress: 0.0,
+        });
+        self.run_async(async move {
+            engine
+                .export_clip_to(&clip_id, selection, output.clone(), |progress| {
+                    let _ = tx.send(Message::ExportProgress(progress));
+                })
+                .await?;
+            Ok(Message::ExportDone(output))
+        });
+    }
+
+    fn export_flow_modal(&mut self, ctx: &egui::Context) {
+        let Some(modal) = self.export_modal.clone() else {
+            return;
+        };
+        let in_progress = matches!(modal, ExportModal::Working { .. });
+        let title = match &modal {
+            ExportModal::Working { .. } => "Exporting",
+            ExportModal::Done { .. } => "Exported",
+        };
+        let mut open = true;
+        let mut window = egui::Window::new(title)
+            .id(egui::Id::new("export-flow"))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO);
+        if !in_progress {
+            window = window.open(&mut open);
+        }
+        window.show(ctx, |ui| {
+            ui.set_width(360.0);
+            match &modal {
+                ExportModal::Working {
+                    quality_label,
+                    progress,
+                } => {
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new(format!("Exporting {quality_label}"))
+                                .family(theme::medium())
+                                .color(theme::ACCENT),
+                        );
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            ui.label(
+                                RichText::new(format!("{:.0}%", progress * 100.0))
+                                    .monospace()
+                                    .color(theme::TEXT),
+                            );
+                        });
+                    });
+                    ui.add_space(6.0);
+                    theme::progress_bar(ui, *progress as f32);
+                    ui.add_space(2.0);
+                    ui.label(
+                        RichText::new("Keep this window open until the file is written.")
+                            .color(theme::MUTED)
+                            .size(12.0),
+                    );
+                }
+                ExportModal::Done { path } => {
+                    ui.label("Your clip was saved.");
+                    ui.label(
+                        RichText::new(path.display().to_string())
+                            .small()
+                            .color(theme::MUTED),
+                    );
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    RichText::new("Show in folder")
+                                        .color(theme::INK)
+                                        .family(theme::medium()),
+                                )
+                                .fill(theme::ACCENT),
+                            )
+                            .clicked()
+                        {
+                            let reveal = path
+                                .parent()
+                                .filter(|parent| !parent.as_os_str().is_empty())
+                                .unwrap_or(path);
+                            let _ = open::that(reveal);
+                        }
+                        if ui.button("Done").clicked() {
+                            self.export_modal = None;
+                        }
+                    });
+                }
+            }
+        });
+        if !open {
+            self.export_modal = None;
+        }
+    }
+
+    fn delete_clip_modal(&mut self, ctx: &egui::Context) {
+        let Some(id) = self.pending_delete_clip.clone() else {
+            return;
+        };
+        let name = self
+            .clips
+            .iter()
+            .find(|clip| clip.id == id)
+            .map(|clip| clip.name.clone())
+            .unwrap_or_else(|| "this video".into());
+        let mut open = true;
+        egui::Window::new("Remove from library")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
+            .show(ctx, |ui| {
+                ui.set_max_width(360.0);
+                ui.label(format!(
+                    "Are you sure you want to remove \"{name}\" from the library?"
+                ));
+                ui.label(
+                    RichText::new(
+                        "This only removes it from Clip Engine. The original recording on disk is not deleted.",
+                    )
+                    .color(theme::MUTED)
+                    .size(12.5),
+                );
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Cancel").clicked() {
+                        self.pending_delete_clip = None;
+                    }
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                RichText::new("Remove from library")
+                                    .color(theme::INK)
+                                    .family(theme::medium()),
+                            )
+                            .fill(theme::DANGER),
+                        )
+                        .clicked()
+                    {
+                        let engine = self.engine.clone();
+                        self.pending_delete_clip = None;
+                        if self.selected_id.as_deref() == Some(id.as_str()) {
+                            self.selected_id = None;
+                        }
+                        self.run_async(async move {
+                            engine.delete_clip(&id).await?;
+                            Ok(Message::Refresh)
+                        });
+                    }
+                });
+            });
+        if !open {
+            self.pending_delete_clip = None;
+        }
+    }
+
     fn delete_version_modal(&mut self, ctx: &egui::Context) {
         let Some(id) = self.pending_delete_job.clone() else {
             return;
@@ -2688,6 +3004,17 @@ fn default_clip_title(name: &str) -> String {
         .to_string()
 }
 
+fn ensure_mp4_path(path: PathBuf) -> PathBuf {
+    match path
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| value.eq_ignore_ascii_case("mp4"))
+    {
+        Some(true) => path,
+        _ => path.with_extension("mp4"),
+    }
+}
+
 fn publish_stage_label(job: &PublishJob) -> String {
     match job.status.as_str() {
         "queued" => "Queued".into(),
@@ -2747,9 +3074,7 @@ fn parse_time(text: &str) -> Option<f64> {
     let parts = text.split(':').collect::<Vec<_>>();
     let seconds = match parts.as_slice() {
         [seconds] => seconds.parse::<f64>().ok()?,
-        [minutes, seconds] => {
-            minutes.parse::<f64>().ok()? * 60.0 + seconds.parse::<f64>().ok()?
-        }
+        [minutes, seconds] => minutes.parse::<f64>().ok()? * 60.0 + seconds.parse::<f64>().ok()?,
         [hours, minutes, seconds] => {
             hours.parse::<f64>().ok()? * 3600.0
                 + minutes.parse::<f64>().ok()? * 60.0
@@ -2758,6 +3083,40 @@ fn parse_time(text: &str) -> Option<f64> {
         _ => return None,
     };
     seconds.is_finite().then_some(seconds.max(0.0))
+}
+
+fn files_being_dropped(ctx: &egui::Context) -> bool {
+    ctx.input(|input| !input.raw.hovered_files.is_empty())
+}
+
+fn is_importable(path: &Path) -> bool {
+    path.extension()
+        .and_then(|value| value.to_str())
+        .is_some_and(|extension| {
+            matches!(
+                extension.to_ascii_lowercase().as_str(),
+                "mkv" | "mp4" | "mov" | "webm" | "avi" | "m4v"
+            )
+        })
+}
+
+fn collect_import_paths(paths: impl IntoIterator<Item = PathBuf>) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    for path in paths {
+        if path.is_dir() {
+            if let Ok(entries) = std::fs::read_dir(&path) {
+                for entry in entries.flatten() {
+                    let child = entry.path();
+                    if child.is_file() && is_importable(&child) {
+                        files.push(child);
+                    }
+                }
+            }
+        } else if is_importable(&path) {
+            files.push(path);
+        }
+    }
+    files
 }
 
 fn expiry_label(expires_at: Option<&str>) -> String {

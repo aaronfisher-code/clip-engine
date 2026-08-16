@@ -145,10 +145,8 @@ mod tests {
 
     #[test]
     fn path_is_within_detects_files_in_a_directory() {
-        let directory = std::env::temp_dir().join(format!(
-            "clip-engine-inbox-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let directory =
+            std::env::temp_dir().join(format!("clip-engine-inbox-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&directory).unwrap();
         let file = directory.join("clip.mkv");
         std::fs::write(&file, b"test").unwrap();

@@ -13,16 +13,26 @@ fn main() -> eframe::Result<()> {
     let engine = Engine::initialize(runtime.handle().clone()).expect("initialize Clip Engine");
     let _keep_alive = runtime;
     let icon = load_icon();
-    let options = eframe::NativeOptions {
+    let mut options = eframe::NativeOptions {
         viewport: ViewportBuilder::default()
             .with_inner_size([1440.0, 900.0])
             .with_min_inner_size([900.0, 620.0])
             .with_title("DAB Clip Engine")
+            .with_app_id("dev.dab.clip-engine")
+            .with_drag_and_drop(true)
             .with_icon(icon),
         vsync: true,
         renderer: Renderer::Glow,
         ..Default::default()
     };
+    // winit has no Wayland file-drop events. Prefer X11 so the OS can deliver drops.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    if std::env::var_os("DISPLAY").is_some() {
+        options.event_loop_builder = Some(Box::new(|event_loop| {
+            use winit::platform::x11::EventLoopBuilderExtX11 as _;
+            event_loop.with_x11();
+        }));
+    }
     eframe::run_native(
         "clip-engine",
         options,

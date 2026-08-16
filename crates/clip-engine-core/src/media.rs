@@ -254,6 +254,10 @@ impl PublishOption {
         self.width.max(1) as f64 * self.height.max(1) as f64 * self.fps.max(1) as f64
             > REF_PIXEL_RATE
     }
+
+    pub fn within_publish_limit(&self) -> bool {
+        self.estimated_bytes <= MAX_PUBLISH_BYTES
+    }
 }
 
 pub fn format_file_size(bytes: u64) -> String {
@@ -315,17 +319,13 @@ pub fn video_bitrate_for(width: i64, height: i64, fps: i64) -> u64 {
     bits.round().clamp(800_000.0, 80_000_000.0) as u64
 }
 
-pub fn estimated_publish_bytes(
-    video_bitrate: u64,
-    duration: f64,
-    has_audio: bool,
-) -> u64 {
+pub fn estimated_publish_bytes(video_bitrate: u64, duration: f64, has_audio: bool) -> u64 {
     let audio = if has_audio { AUDIO_BITRATE } else { 0 };
     let payload = (video_bitrate + audio) as f64 * duration.max(0.05) / 8.0;
     (payload * SIZE_MARGIN).ceil() as u64
 }
 
-pub fn publish_options(
+pub fn export_options(
     source_width: i64,
     source_height: i64,
     source_fps: f64,
@@ -338,9 +338,6 @@ pub fn publish_options(
         for fps in fps_steps(source_fps) {
             let video_bitrate = video_bitrate_for(width, height, fps);
             let estimated_bytes = estimated_publish_bytes(video_bitrate, duration, has_audio);
-            if estimated_bytes > MAX_PUBLISH_BYTES {
-                continue;
-            }
             options.push(PublishOption {
                 width,
                 height,
@@ -353,6 +350,19 @@ pub fn publish_options(
     options
 }
 
+pub fn publish_options(
+    source_width: i64,
+    source_height: i64,
+    source_fps: f64,
+    duration: f64,
+    has_audio: bool,
+) -> Vec<PublishOption> {
+    export_options(source_width, source_height, source_fps, duration, has_audio)
+        .into_iter()
+        .filter(PublishOption::within_publish_limit)
+        .collect()
+}
+
 pub fn resolve_export_profile(
     source_width: i64,
     source_height: i64,
@@ -361,21 +371,38 @@ pub fn resolve_export_profile(
 ) -> anyhow::Result<ExportProfile> {
     let duration = selection.end - selection.start;
     let has_audio = !selection.audio_stream_indexes.is_empty();
-    let options = publish_options(
-        source_width,
-        source_height,
-        source_fps,
-        duration,
-        has_audio,
-    );
+    let options = publish_options(source_width, source_height, source_fps, duration, has_audio);
     if options.is_empty() {
-        bail!("This selection is too long to publish under 200 MB, even at 720p30. Shorten the trim.");
+        bail!(
+            "This selection is too long to publish under 200 MB, even at 720p30. Shorten the trim."
+        );
     }
     if let Some(profile) = &selection.export {
         if let Some(option) = options.iter().find(|option| option.matches(profile)) {
             return Ok(option.profile());
         }
         bail!("That publish quality would exceed 200 MB for this selection.");
+    }
+    Ok(options[0].profile())
+}
+
+pub fn resolve_local_export_profile(
+    source_width: i64,
+    source_height: i64,
+    source_fps: f64,
+    selection: &Selection,
+) -> anyhow::Result<ExportProfile> {
+    let duration = selection.end - selection.start;
+    let has_audio = !selection.audio_stream_indexes.is_empty();
+    let options = export_options(source_width, source_height, source_fps, duration, has_audio);
+    if options.is_empty() {
+        bail!("No export qualities are available for this selection.");
+    }
+    if let Some(profile) = &selection.export {
+        if let Some(option) = options.iter().find(|option| option.matches(profile)) {
+            return Ok(option.profile());
+        }
+        bail!("That export quality is not available for this selection.");
     }
     Ok(options[0].profile())
 }
@@ -680,7 +707,9 @@ mod tests {
             20,
         );
         assert!(args.iter().any(|value| value.ends_with("fps=60")));
-        assert!(args.iter().any(|value| value.starts_with("scale=1920:1080:")));
+        assert!(args
+            .iter()
+            .any(|value| value.starts_with("scale=1920:1080:")));
         let bitrate = args.iter().position(|value| value == "-b:v").unwrap();
         let maxrate = args.iter().position(|value| value == "-maxrate").unwrap();
         assert_eq!(args[bitrate + 1], args[maxrate + 1]);
@@ -715,7 +744,9 @@ mod tests {
         assert!(estimated > raw);
         assert!(estimated > MAX_PUBLISH_BYTES);
         let options = publish_options(2560, 1440, 120.0, duration, true);
-        assert!(!options.iter().any(|option| option.quality_label() == "1440p120"));
+        assert!(!options
+            .iter()
+            .any(|option| option.quality_label() == "1440p120"));
     }
 
     #[test]
@@ -742,22 +773,31 @@ mod tests {
             .map(PublishOption::quality_label)
             .collect::<Vec<_>>();
         assert_eq!(labels, vec!["1080p60", "1080p30", "720p60", "720p30"]);
-        assert!(options.iter().all(|option| option.estimated_bytes <= MAX_PUBLISH_BYTES));
+        assert!(options
+            .iter()
+            .all(|option| option.estimated_bytes <= MAX_PUBLISH_BYTES));
     }
 
     #[test]
     fn publish_ladder_hides_options_over_200mb() {
         let options = publish_options(1920, 1080, 120.0, 90.0, true);
         assert!(!options.is_empty());
-        assert!(options.iter().all(|option| option.estimated_bytes <= MAX_PUBLISH_BYTES));
-        assert!(!options.iter().any(|option| option.quality_label() == "1080p120"));
-        assert!(options.iter().any(|option| option.quality_label() == "720p30"));
+        assert!(options
+            .iter()
+            .all(|option| option.estimated_bytes <= MAX_PUBLISH_BYTES));
+        assert!(!options
+            .iter()
+            .any(|option| option.quality_label() == "1080p120"));
+        assert!(options
+            .iter()
+            .any(|option| option.quality_label() == "720p30"));
     }
 
     #[test]
     fn very_long_clips_can_have_no_publish_options() {
         let options = publish_options(1920, 1080, 120.0, 20.0 * 60.0, true);
         assert!(options.is_empty());
+        assert!(!export_options(1920, 1080, 120.0, 20.0 * 60.0, true).is_empty());
     }
 
     #[test]

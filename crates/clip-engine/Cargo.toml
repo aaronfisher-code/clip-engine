@@ -22,6 +22,7 @@ raw-window-handle = "0.6"
 rfd = "0.15"
 serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
+winit = { version = "0.30", default-features = false, features = ["x11"] }
 
 [build-dependencies]
 pkg-config = "0.3"

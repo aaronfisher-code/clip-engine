@@ -1,6 +1,7 @@
 use eframe::egui::{
-    self, Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, Frame, Margin, Pos2,
-    Rect, Sense, Shadow, Shape, Stroke, Ui, Vec2, Visuals,
+    self, Align, Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, Frame,
+    Layout, Margin, Pos2, Rect, RichText, Sense, Shadow, Shape, Stroke, Ui, UiBuilder, Vec2,
+    Visuals,
 };
 use std::sync::Arc;
 
@@ -9,13 +10,13 @@ pub const PANEL: Color32 = Color32::from_rgb(16, 18, 22);
 pub const CARD: Color32 = Color32::from_rgb(22, 25, 31);
 pub const CARD_HOVER: Color32 = Color32::from_rgb(28, 32, 40);
 pub const LINE: Color32 = Color32::from_rgb(42, 48, 58);
-pub const ACCENT: Color32 = Color32::from_rgb(232, 176, 74);
-pub const ACCENT_DIM: Color32 = Color32::from_rgba_premultiplied(51, 39, 16, 56);
+pub const ACCENT: Color32 = Color32::from_rgb(194, 247, 64);
+pub const ACCENT_DIM: Color32 = Color32::from_rgba_premultiplied(43, 54, 14, 56);
 pub const TEXT: Color32 = Color32::from_rgb(236, 233, 226);
 pub const MUTED: Color32 = Color32::from_rgb(148, 154, 164);
 pub const DANGER: Color32 = Color32::from_rgb(232, 112, 104);
 pub const OK: Color32 = Color32::from_rgb(110, 186, 122);
-pub const INK: Color32 = Color32::from_rgb(18, 16, 12);
+pub const INK: Color32 = Color32::from_rgb(12, 16, 10);
 
 pub fn medium() -> FontFamily {
     FontFamily::Name("medium".into())
@@ -91,10 +92,9 @@ pub fn apply(ctx: &egui::Context) {
     ctx.set_visuals(visuals);
 
     let mut style = (*ctx.style()).clone();
-    style.text_styles.insert(
-        egui::TextStyle::Heading,
-        FontId::new(20.0, medium()),
-    );
+    style
+        .text_styles
+        .insert(egui::TextStyle::Heading, FontId::new(20.0, medium()));
     style.text_styles.insert(
         egui::TextStyle::Body,
         FontId::new(14.0, FontFamily::Proportional),
@@ -114,6 +114,7 @@ pub fn apply(ctx: &egui::Context) {
     style.spacing.item_spacing = Vec2::new(10.0, 8.0);
     style.spacing.button_padding = Vec2::new(12.0, 6.0);
     style.spacing.indent = 14.0;
+    style.spacing.scroll.floating_allocated_width = style.spacing.scroll.bar_width + 4.0;
     style.visuals = ctx.style().visuals.clone();
     ctx.set_style(style);
 }
@@ -133,9 +134,7 @@ pub fn side_frame() -> Frame {
 }
 
 pub fn central_frame() -> Frame {
-    Frame::NONE
-        .fill(BG)
-        .inner_margin(Margin::symmetric(16, 14))
+    Frame::NONE.fill(BG).inner_margin(Margin::symmetric(16, 14))
 }
 
 pub fn card() -> Frame {
@@ -196,18 +195,22 @@ pub fn published_tick_overlay(ui: &Ui, thumb: Rect, count: usize) -> egui::Respo
 
 pub fn progress_bar(ui: &mut Ui, progress: f32) {
     let height = 10.0;
-    let (rect, _) = ui.allocate_exact_size(
-        Vec2::new(ui.available_width(), height),
-        Sense::hover(),
-    );
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), height), Sense::hover());
     ui.painter()
         .rect_filled(rect, CornerRadius::same(5), Color32::from_rgb(14, 16, 20));
-    ui.painter()
-        .rect_stroke(rect, CornerRadius::same(5), Stroke::new(1.0, LINE), egui::StrokeKind::Inside);
+    ui.painter().rect_stroke(
+        rect,
+        CornerRadius::same(5),
+        Stroke::new(1.0, LINE),
+        egui::StrokeKind::Inside,
+    );
     let filled = rect.width() * progress.clamp(0.0, 1.0);
     if filled > 0.0 {
         ui.painter().rect_filled(
-            Rect::from_min_size(rect.min, Vec2::new(filled.max(6.0).min(rect.width()), rect.height())),
+            Rect::from_min_size(
+                rect.min,
+                Vec2::new(filled.max(6.0).min(rect.width()), rect.height()),
+            ),
             CornerRadius::same(5),
             ACCENT,
         );
@@ -258,8 +261,11 @@ pub fn buffering_overlay(ui: &Ui, rect: Rect) {
         CornerRadius::ZERO,
         Color32::from_rgba_unmultiplied(8, 9, 11, 88),
     );
-    ui.painter()
-        .circle_filled(center, 26.0, Color32::from_rgba_unmultiplied(12, 13, 16, 210));
+    ui.painter().circle_filled(
+        center,
+        26.0,
+        Color32::from_rgba_unmultiplied(12, 13, 16, 210),
+    );
     ui.painter()
         .circle_stroke(center, 26.0, Stroke::new(1.0, LINE));
     let radius = 11.0;
@@ -283,6 +289,107 @@ pub fn buffering_overlay(ui: &Ui, rect: Rect) {
         MUTED,
     );
     ui.ctx().request_repaint();
+}
+
+pub fn window_drop_overlay(ctx: &egui::Context) {
+    let screen = ctx.screen_rect();
+    let painter = ctx.layer_painter(egui::LayerId::new(
+        egui::Order::Foreground,
+        egui::Id::new("window-drop-overlay"),
+    ));
+    painter.rect_filled(
+        screen,
+        CornerRadius::ZERO,
+        Color32::from_rgba_unmultiplied(10, 11, 13, 138),
+    );
+    let inset = screen.shrink(14.0);
+    painter.rect_filled(inset, CornerRadius::same(10), ACCENT_DIM);
+    paint_dashed_rect(&painter, inset.shrink(1.0), ACCENT);
+    painter.text(
+        screen.center() - Vec2::new(0.0, 10.0),
+        egui::Align2::CENTER_CENTER,
+        "Drop recordings to import",
+        FontId::new(22.0, medium()),
+        ACCENT,
+    );
+    painter.text(
+        screen.center() + Vec2::new(0.0, 16.0),
+        egui::Align2::CENTER_CENTER,
+        "Anywhere in the window works",
+        FontId::new(13.0, FontFamily::Proportional),
+        MUTED,
+    );
+}
+
+pub fn import_drop_zone(ui: &mut Ui, hovering_files: bool, height: f32) -> egui::Response {
+    let (rect, response) =
+        ui.allocate_exact_size(Vec2::new(ui.available_width(), height), Sense::click());
+    let hovered = response.hovered() || hovering_files;
+    let active = response.is_pointer_button_down_on();
+    let radius = CornerRadius::same(6);
+    let bg = if hovering_files {
+        ACCENT_DIM
+    } else if active {
+        Color32::from_rgb(36, 40, 50)
+    } else if hovered {
+        CARD_HOVER
+    } else {
+        CARD
+    };
+    let stroke = if hovering_files || active {
+        ACCENT
+    } else if hovered {
+        ACCENT.gamma_multiply(0.7)
+    } else {
+        LINE
+    };
+
+    ui.painter().rect_filled(rect, radius, bg);
+    paint_dashed_rect(ui.painter(), rect.shrink(1.0), stroke);
+
+    let title = if hovering_files {
+        "Drop to import"
+    } else {
+        "Drop recordings here"
+    };
+    let hint = if hovering_files {
+        "Release to add them to the library"
+    } else {
+        "or click to browse"
+    };
+    ui.painter().text(
+        rect.center() - Vec2::new(0.0, 8.0),
+        egui::Align2::CENTER_CENTER,
+        title,
+        FontId::new(13.5, medium()),
+        if hovering_files { ACCENT } else { TEXT },
+    );
+    ui.painter().text(
+        rect.center() + Vec2::new(0.0, 10.0),
+        egui::Align2::CENTER_CENTER,
+        hint,
+        FontId::new(11.5, FontFamily::Proportional),
+        MUTED,
+    );
+
+    response
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text("Choose recordings to import")
+}
+
+fn paint_dashed_rect(painter: &egui::Painter, rect: Rect, color: Color32) {
+    let stroke = Stroke::new(1.15, color);
+    let dash = 5.5;
+    let gap = 3.5;
+    let corners = [
+        [rect.left_top(), rect.right_top()],
+        [rect.right_top(), rect.right_bottom()],
+        [rect.right_bottom(), rect.left_bottom()],
+        [rect.left_bottom(), rect.left_top()],
+    ];
+    for points in corners {
+        painter.add(Shape::dashed_line(&points, stroke, dash, gap));
+    }
 }
 
 pub fn library_menu_button(ui: &mut Ui, open: bool) -> egui::Response {
@@ -337,14 +444,7 @@ pub fn library_menu_button(ui: &mut Ui, open: bool) -> egui::Response {
         0.0,
         color,
     );
-    paint_menu_bar(
-        ui.painter(),
-        center,
-        length,
-        thickness,
-        0.0,
-        color,
-    );
+    paint_menu_bar(ui.painter(), center, length, thickness, 0.0, color);
     paint_menu_bar(
         ui.painter(),
         center + Vec2::new(0.0, gap),
@@ -378,6 +478,201 @@ fn paint_menu_bar(
     painter.circle_filled(end, thickness * 0.5, color);
 }
 
+pub fn folder_path_field(ui: &mut Ui, path: &str) -> egui::Response {
+    let height = (ui.text_style_height(&egui::TextStyle::Button)
+        + ui.spacing().button_padding.y * 2.0)
+        .max(ui.spacing().interact_size.y);
+    let (rect, response) =
+        ui.allocate_exact_size(Vec2::new(ui.available_width(), height), Sense::click());
+    let hovered = response.hovered();
+    let active = response.is_pointer_button_down_on();
+    let radius = CornerRadius::same(4);
+    let bg = if active {
+        Color32::from_rgb(14, 16, 20)
+    } else if hovered {
+        Color32::from_rgb(18, 20, 25)
+    } else {
+        BG
+    };
+    let stroke = if active {
+        ACCENT
+    } else if hovered {
+        ACCENT.gamma_multiply(0.7)
+    } else {
+        LINE
+    };
+    ui.painter().rect_filled(rect, radius, bg);
+    ui.painter().rect_stroke(
+        rect,
+        radius,
+        Stroke::new(1.0, stroke),
+        egui::StrokeKind::Inside,
+    );
+    ui.scope_builder(
+        UiBuilder::new()
+            .max_rect(rect.shrink2(Vec2::new(8.0, 0.0)))
+            .layout(Layout::left_to_right(Align::Center))
+            .sense(Sense::hover()),
+        |ui| {
+            ui.spacing_mut().item_spacing = Vec2::new(8.0, 0.0);
+            let icon_color = if hovered || active { ACCENT } else { MUTED };
+            let (icon_rect, _) = ui.allocate_exact_size(Vec2::splat(16.0), Sense::hover());
+            paint_folder_icon(ui.painter(), icon_rect, icon_color);
+            let display = if path.is_empty() {
+                "Choose inbox folder"
+            } else {
+                path
+            };
+            ui.add(
+                egui::Label::new(RichText::new(display).monospace().size(12.0).color(
+                    if path.is_empty() {
+                        MUTED
+                    } else if hovered {
+                        TEXT
+                    } else {
+                        Color32::from_rgb(196, 200, 208)
+                    },
+                ))
+                .truncate()
+                .selectable(false),
+            );
+        },
+    );
+    let tooltip = if path.is_empty() {
+        "Choose inbox folder"
+    } else {
+        path
+    };
+    response.on_hover_text(tooltip)
+}
+
+pub fn hotkey_button(ui: &mut Ui, key: &str, label: &str, key_first: bool) -> egui::Response {
+    let height = (ui.text_style_height(&egui::TextStyle::Button)
+        + ui.spacing().button_padding.y * 2.0)
+        .max(ui.spacing().interact_size.y);
+    let key_galley =
+        ui.fonts(|fonts| fonts.layout_no_wrap(key.to_owned(), FontId::monospace(11.0), TEXT));
+    let label_galley = ui.fonts(|fonts| {
+        fonts.layout_no_wrap(
+            label.to_owned(),
+            FontId::new(13.5, FontFamily::Proportional),
+            TEXT,
+        )
+    });
+    let key_size = Vec2::new(
+        (key_galley.size().x + 10.0).max(22.0),
+        (key_galley.size().y + 5.0).max(18.0),
+    );
+    let pad = ui.spacing().button_padding;
+    let gap = 8.0;
+    let width = pad.x * 2.0 + key_size.x + gap + label_galley.size().x;
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, height), Sense::click());
+    let hovered = response.hovered();
+    let active = response.is_pointer_button_down_on();
+    let radius = CornerRadius::same(4);
+    let bg = if active {
+        Color32::from_rgb(36, 40, 50)
+    } else if hovered {
+        CARD_HOVER
+    } else {
+        CARD
+    };
+    let stroke = if hovered || active {
+        ACCENT.gamma_multiply(0.7)
+    } else {
+        LINE
+    };
+    ui.painter().rect_filled(rect, radius, bg);
+    ui.painter().rect_stroke(
+        rect,
+        radius,
+        Stroke::new(1.0, stroke),
+        egui::StrokeKind::Inside,
+    );
+
+    let inner = rect.shrink2(Vec2::new(pad.x, 0.0));
+    let (key_rect, label_pos) = if key_first {
+        let key_rect = Rect::from_min_size(
+            Pos2::new(inner.left(), inner.center().y - key_size.y * 0.5),
+            key_size,
+        );
+        let label_pos = Pos2::new(
+            key_rect.right() + gap,
+            inner.center().y - label_galley.size().y * 0.5,
+        );
+        (key_rect, label_pos)
+    } else {
+        let key_rect = Rect::from_min_size(
+            Pos2::new(
+                inner.right() - key_size.x,
+                inner.center().y - key_size.y * 0.5,
+            ),
+            key_size,
+        );
+        let label_pos = Pos2::new(inner.left(), inner.center().y - label_galley.size().y * 0.5);
+        (key_rect, label_pos)
+    };
+    paint_keycap(
+        ui.painter(),
+        key_rect,
+        key_galley,
+        if hovered || active { ACCENT } else { TEXT },
+    );
+    ui.painter().galley(label_pos, label_galley, TEXT);
+    response.on_hover_text(format!("{label}  ·  {key}"))
+}
+
+fn paint_keycap(
+    painter: &egui::Painter,
+    rect: Rect,
+    galley: std::sync::Arc<egui::Galley>,
+    color: Color32,
+) {
+    let lip = 2.0;
+    let base = Color32::from_rgb(18, 20, 24);
+    let face = Color32::from_rgb(38, 43, 52);
+    painter.rect_filled(rect, CornerRadius::same(3), base);
+    let face_rect = Rect::from_min_max(rect.min, Pos2::new(rect.right(), rect.bottom() - lip));
+    painter.rect_filled(face_rect, CornerRadius::same(3), face);
+    painter.rect_stroke(
+        rect,
+        CornerRadius::same(3),
+        Stroke::new(1.0, Color32::from_rgb(58, 64, 76)),
+        egui::StrokeKind::Inside,
+    );
+    let text_pos = Pos2::new(
+        face_rect.center().x - galley.size().x * 0.5,
+        face_rect.center().y - galley.size().y * 0.5,
+    );
+    painter.galley_with_override_text_color(text_pos, galley, color);
+}
+
+pub fn paint_folder_icon(painter: &egui::Painter, rect: Rect, color: Color32) {
+    let center = rect.center();
+    let width = 13.0;
+    let height = 10.0;
+    let left = center.x - width * 0.5;
+    let top = center.y - height * 0.5 + 0.5;
+    painter.rect_filled(
+        Rect::from_min_max(Pos2::new(left, top), Pos2::new(left + 6.0, top + 3.5)),
+        CornerRadius {
+            nw: 2,
+            ne: 1,
+            sw: 0,
+            se: 0,
+        },
+        color,
+    );
+    painter.rect_filled(
+        Rect::from_min_max(
+            Pos2::new(left, top + 2.5),
+            Pos2::new(left + width, top + height),
+        ),
+        CornerRadius::same(2),
+        color,
+    );
+}
+
 pub fn transport_icon_button(
     ui: &mut Ui,
     size: Vec2,
@@ -391,9 +686,9 @@ pub fn transport_icon_button(
     let radius = CornerRadius::same(8);
     let bg = if filled {
         if active {
-            Color32::from_rgb(210, 154, 58)
+            ACCENT.gamma_multiply(0.82)
         } else if hovered {
-            Color32::from_rgb(242, 190, 92)
+            Color32::from_rgb(214, 255, 110)
         } else {
             ACCENT
         }
@@ -467,13 +762,7 @@ pub fn paint_to_start_icon(painter: &egui::Painter, rect: Rect, color: Color32) 
     ));
 }
 
-pub fn paint_trim_handle(
-    painter: &egui::Painter,
-    x: f32,
-    track: Rect,
-    is_in: bool,
-    active: bool,
-) {
+pub fn paint_trim_handle(painter: &egui::Painter, x: f32, track: Rect, is_in: bool, active: bool) {
     let color = if active { TEXT } else { ACCENT };
     let bar = Rect::from_min_max(
         Pos2::new(x - 2.0, track.top()),
@@ -504,7 +793,10 @@ pub fn paint_trim_handle(
     for index in 0..3 {
         let gy = cap.top() + 6.0 + index as f32 * 4.0;
         painter.line_segment(
-            [Pos2::new(cap.left() + 4.0, gy), Pos2::new(cap.right() - 4.0, gy)],
+            [
+                Pos2::new(cap.left() + 4.0, gy),
+                Pos2::new(cap.right() - 4.0, gy),
+            ],
             Stroke::new(1.4, INK),
         );
     }
@@ -519,10 +811,7 @@ pub fn paint_playhead(painter: &egui::Painter, x: f32, track: Rect) {
         CornerRadius::same(1),
         TEXT,
     );
-    let cap = Rect::from_center_size(
-        Pos2::new(x, track.top() - 6.0),
-        Vec2::new(14.0, 14.0),
-    );
+    let cap = Rect::from_center_size(Pos2::new(x, track.top() - 6.0), Vec2::new(14.0, 14.0));
     painter.rect_filled(cap, CornerRadius::same(3), TEXT);
     painter.add(Shape::convex_polygon(
         vec![

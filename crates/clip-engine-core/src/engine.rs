@@ -136,12 +136,7 @@ impl Engine {
         let mut task_clip = clip.clone();
         let source = PathBuf::from(&clip.source_path);
         self.spawn(async move {
-            match media::make_preview(
-                &engine.paths,
-                &source,
-                &thumbnail_path,
-                task_clip.duration,
-            )
+            match media::make_preview(&engine.paths, &source, &thumbnail_path, task_clip.duration)
                 .await
             {
                 Ok(()) => {
@@ -303,24 +298,7 @@ impl Engine {
             .database
             .clip(&clip_id)?
             .ok_or_else(|| anyhow::anyhow!("Clip not found"))?;
-        if selection.start < 0.0
-            || selection.end <= selection.start
-            || selection.end > clip.duration + 0.05
-        {
-            anyhow::bail!("The trim selection is invalid.");
-        }
-        let valid = clip
-            .audio_tracks
-            .iter()
-            .map(|track| track.stream_index)
-            .collect::<std::collections::HashSet<_>>();
-        if selection
-            .audio_stream_indexes
-            .iter()
-            .any(|index| !valid.contains(index))
-        {
-            anyhow::bail!("An audio selection is invalid.");
-        }
+        validate_selection(&clip, &selection)?;
         let mut selection = selection;
         selection.export = Some(media::resolve_export_profile(
             clip.width,
@@ -361,6 +339,39 @@ impl Engine {
             run_publish(engine, clip, task_job, title).await;
         });
         Ok(job)
+    }
+
+    pub async fn export_clip_to(
+        &self,
+        clip_id: &str,
+        mut selection: Selection,
+        output: PathBuf,
+        mut progress: impl FnMut(f64) + Send,
+    ) -> anyhow::Result<PathBuf> {
+        let clip = self
+            .database
+            .clip(clip_id)?
+            .ok_or_else(|| anyhow::anyhow!("Clip not found"))?;
+        validate_selection(&clip, &selection)?;
+        let profile =
+            media::resolve_local_export_profile(clip.width, clip.height, clip.fps, &selection)?;
+        selection.export = Some(profile.clone());
+        if let Some(parent) = output.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        let encoder = self.encoder.read().await.clone();
+        media::export_clip(
+            &self.paths,
+            Path::new(&clip.source_path),
+            &output,
+            &selection,
+            &profile,
+            &encoder,
+            self.quality,
+            &mut progress,
+        )
+        .await?;
+        Ok(output)
     }
 
     pub async fn login(
@@ -462,6 +473,28 @@ impl Engine {
     }
 }
 
+fn validate_selection(clip: &Clip, selection: &Selection) -> anyhow::Result<()> {
+    if selection.start < 0.0
+        || selection.end <= selection.start
+        || selection.end > clip.duration + 0.05
+    {
+        anyhow::bail!("The trim selection is invalid.");
+    }
+    let valid = clip
+        .audio_tracks
+        .iter()
+        .map(|track| track.stream_index)
+        .collect::<std::collections::HashSet<_>>();
+    if selection
+        .audio_stream_indexes
+        .iter()
+        .any(|index| !valid.contains(index))
+    {
+        anyhow::bail!("An audio selection is invalid.");
+    }
+    Ok(())
+}
+
 fn supported(path: &Path) -> bool {
     path.extension()
         .and_then(|value| value.to_str())
@@ -508,7 +541,9 @@ async fn run_publish(engine: Engine, clip: Clip, mut job: PublishJob, title: Str
         .await?;
         let video_size = tokio::fs::metadata(&output).await?.len();
         if video_size > media::MAX_PUBLISH_BYTES {
-            anyhow::bail!("The transcoded clip is over 200 MB. Choose a lower quality or shorten the trim.");
+            anyhow::bail!(
+                "The transcoded clip is over 200 MB. Choose a lower quality or shorten the trim."
+            );
         }
         let thumbnail_size = tokio::fs::metadata(&thumbnail).await?.len();
         let created = engine
