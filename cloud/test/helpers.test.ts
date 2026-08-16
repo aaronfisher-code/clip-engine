@@ -27,7 +27,7 @@ describe("cloud input boundaries", () => {
     expect(page).toContain('property="og:site_name" content="Dabs Clip Engine"');
     expect(page).toContain('property="og:title" content="Ace &amp; &lt;escape&gt; &quot;this&quot;"');
     expect(page).toContain('property="og:video:secure_url" content="https://media.example/published/ace/video.mp4"');
-    expect(page).toContain('content="1:05 · 1920×1080 · 120 FPS · by DAB &amp; friends"');
+    expect(page).toContain('content="1:05 · 1080p120 · by DAB &amp; friends"');
     expect(page).toContain('<span class="eyebrow">Published by DAB &amp; friends</span>');
     expect(page).toContain('<video controls playsinline preload="metadata"');
     expect(page).not.toContain("<escape>");

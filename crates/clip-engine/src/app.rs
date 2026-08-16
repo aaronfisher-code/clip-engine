@@ -713,12 +713,9 @@ impl eframe::App for ClipApp {
                                 .size(16.0),
                         );
                         ui.label(
-                            RichText::new(format!(
-                                "Local 120 fps trim deck  ·  v{}",
-                                Engine::current_version()
-                            ))
-                            .color(theme::MUTED)
-                            .size(11.5),
+                            RichText::new(format!("v{}", Engine::current_version()))
+                                .color(theme::MUTED)
+                                .size(11.5),
                         );
                     });
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -817,26 +814,12 @@ impl eframe::App for ClipApp {
                     }
                 } else {
                     ui.centered_and_justified(|ui| {
-                        theme::card().show(ui, |ui| {
-                            ui.set_max_width(420.0);
-                            ui.label(
-                                RichText::new("Your replay buffer, refined.")
-                                    .family(theme::medium())
-                                    .size(22.0),
-                            );
-                            ui.add_space(6.0);
-                            ui.label(
-                                RichText::new(
-                                    "Import a recording to trim it, pick the audio you want, and publish a share link.",
-                                )
+                        ui.label(
+                            RichText::new("Upload some clips to get started")
+                                .family(theme::medium())
+                                .size(18.0)
                                 .color(theme::MUTED),
-                            );
-                            ui.add_space(12.0);
-                            if theme::import_drop_zone(ui, self.drop_hovering, 84.0).clicked()
-                            {
-                                self.import_recordings();
-                            }
-                        });
+                        );
                     });
                 }
             });
@@ -2447,18 +2430,36 @@ impl ClipApp {
                 {
                     self.forgot_step = 1;
                 }
+                let access_pending = self
+                    .access_request
+                    .as_ref()
+                    .is_some_and(|request| request.status == "pending");
+                let request_label = if access_pending {
+                    "Awaiting owner approval"
+                } else if self.busy {
+                    "Access requested"
+                } else {
+                    "Request access"
+                };
                 if ui
                     .add_enabled(
-                        !self.busy,
+                        !self.busy && !access_pending,
                         egui::Button::new(if self.show_auth == Some(AuthMode::Login) {
                             "Sign in"
                         } else {
-                            "Request access"
+                            request_label
                         }),
                     )
                     .clicked()
                 {
                     self.submit_auth();
+                }
+                if self.show_auth == Some(AuthMode::Request) && (self.busy || access_pending) {
+                    ui.label(
+                        egui::RichText::new("Your request is pending owner approval.")
+                            .color(theme::MUTED)
+                            .size(12.0),
+                    );
                 }
             } else if self.forgot_step == 1 {
                 ui.label("Username");
@@ -2572,7 +2573,7 @@ impl ClipApp {
                         }
                     }
                     _ => {
-                        ui.heading("Waiting for owner approval");
+                        ui.heading("Awaiting owner approval");
                         if ui.button("Check status").clicked() {
                             let engine = self.engine.clone();
                             self.run_async(async move {
