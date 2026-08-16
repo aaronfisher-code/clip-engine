@@ -249,6 +249,11 @@ impl PublishOption {
     pub fn matches(&self, profile: &ExportProfile) -> bool {
         self.width == profile.width && self.height == profile.height && self.fps == profile.fps
     }
+
+    pub fn heavier_than_1080p120(&self) -> bool {
+        self.width.max(1) as f64 * self.height.max(1) as f64 * self.fps.max(1) as f64
+            > REF_PIXEL_RATE
+    }
 }
 
 pub fn format_file_size(bytes: u64) -> String {
@@ -753,5 +758,22 @@ mod tests {
     fn very_long_clips_can_have_no_publish_options() {
         let options = publish_options(1920, 1080, 120.0, 20.0 * 60.0, true);
         assert!(options.is_empty());
+    }
+
+    #[test]
+    fn options_heavier_than_1080p120_are_flagged() {
+        let options = publish_options(3840, 2160, 120.0, 6.0, true);
+        let flag = |label: &str| {
+            options
+                .iter()
+                .find(|option| option.quality_label() == label)
+                .map(PublishOption::heavier_than_1080p120)
+        };
+        assert_eq!(flag("1080p120"), Some(false));
+        assert_eq!(flag("2160p30"), Some(false));
+        assert_eq!(flag("1440p60"), Some(false));
+        assert_eq!(flag("1440p120"), Some(true));
+        assert_eq!(flag("2160p60"), Some(true));
+        assert_eq!(flag("2160p120"), Some(true));
     }
 }

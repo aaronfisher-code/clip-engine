@@ -3,7 +3,7 @@ use crate::theme;
 use clip_engine_core::cloud::{AccessRequest, AdminUser, CloudClip, CloudUser, PasswordReset};
 use clip_engine_core::models::{AppConfig, Clip, PublishJob, Selection};
 use clip_engine_core::paths::{default_inbox_dir, path_is_within};
-use clip_engine_core::{format_file_size, publish_options, Engine};
+use clip_engine_core::{format_file_size, publish_options, Engine, PublishOption};
 use eframe::egui::{
     self, Align, Color32, ColorImage, CornerRadius, CursorIcon, Layout, Pos2, Rect, RichText,
     Sense, StrokeKind, TextureHandle, TextureOptions, Ui, UiBuilder, Vec2,
@@ -70,6 +70,20 @@ enum TimelineDrag {
     Out,
 }
 
+#[derive(Clone)]
+enum PublishModal {
+    Name {
+        clip_id: String,
+        title: String,
+        selection: Selection,
+        quality_label: String,
+        focus_title: bool,
+    },
+    Job {
+        id: String,
+    },
+}
+
 pub struct ClipApp {
     engine: Engine,
     player: Option<Player>,
@@ -89,6 +103,8 @@ pub struct ClipApp {
     access_filter: AccessFilter,
     access_query: String,
     created_reset: Option<PasswordReset>,
+    pending_delete_job: Option<String>,
+    publish_modal: Option<PublishModal>,
     editor: Option<EditorState>,
     thumbs: HashMap<String, TextureHandle>,
     notice: Option<String>,
@@ -174,6 +190,8 @@ impl ClipApp {
                     access_filter: AccessFilter::Pending,
                     access_query: String::new(),
                     created_reset: None,
+                    pending_delete_job: None,
+                    publish_modal: None,
                     editor: None,
                     thumbs: HashMap::new(),
                     notice: None,
@@ -216,6 +234,8 @@ impl ClipApp {
             access_filter: AccessFilter::Pending,
             access_query: String::new(),
             created_reset: None,
+            pending_delete_job: None,
+            publish_modal: None,
             editor: None,
             thumbs: HashMap::new(),
             notice: None,
@@ -647,6 +667,12 @@ impl eframe::App for ClipApp {
         if self.created_reset.is_some() {
             self.reset_modal(ctx);
         }
+        if self.pending_delete_job.is_some() {
+            self.delete_version_modal(ctx);
+        }
+        if self.publish_modal.is_some() {
+            self.publish_flow_modal(ctx);
+        }
 
         self.stop_at_out_point();
 
@@ -660,24 +686,19 @@ impl eframe::App for ClipApp {
 
 impl ClipApp {
     fn status_banner(&mut self, ui: &mut Ui) {
+        let tracked_job = match &self.publish_modal {
+            Some(PublishModal::Job { id }) => Some(id.as_str()),
+            _ => None,
+        };
         let active = self.selected_id.as_ref().and_then(|clip_id| {
             self.jobs.iter().find(|job| {
                 job.clip_id == *clip_id
                     && matches!(job.status.as_str(), "queued" | "transcoding" | "uploading")
+                    && tracked_job != Some(job.id.as_str())
             })
         });
         if let Some(job) = active.cloned() {
-            let stage = match job.status.as_str() {
-                "queued" => "Queued".into(),
-                "transcoding" => job
-                    .selection
-                    .as_ref()
-                    .and_then(|selection| selection.export.as_ref())
-                    .map(|profile| format!("Exporting {}p{}", profile.height, profile.fps))
-                    .unwrap_or_else(|| "Exporting".into()),
-                "uploading" => "Uploading".into(),
-                _ => "Working".into(),
-            };
+            let stage = publish_stage_label(&job);
             theme::card().show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
                 ui.horizontal(|ui| {
@@ -868,16 +889,21 @@ impl ClipApp {
                 ui.horizontal_centered(|ui| {
                     self.ensure_thumb(ui.ctx(), clip);
                     let thumb_size = Vec2::new(80.0, 45.0);
-                    if let Some(texture) = self.thumbs.get(&clip.id) {
+                    let thumb_rect = if let Some(texture) = self.thumbs.get(&clip.id) {
                         ui.add(
                             egui::Image::new((texture.id(), thumb_size))
                                 .corner_radius(4.0)
                                 .sense(Sense::hover()),
-                        );
+                        )
+                        .rect
                     } else {
                         let (thumb, _) = ui.allocate_exact_size(thumb_size, Sense::hover());
                         ui.painter()
                             .rect_filled(thumb, CornerRadius::same(4), theme::BG);
+                        thumb
+                    };
+                    if versions > 0 {
+                        theme::published_tick_overlay(ui, thumb_rect, versions);
                     }
                     let meta = format!(
                         "{}p{}  ·  {}",
@@ -885,8 +911,7 @@ impl ClipApp {
                         clip.fps.round(),
                         format_duration_compact(clip.duration),
                     );
-                    let chip_reserve = if versions > 0 { 32.0 } else { 0.0 };
-                    let text_width = (ui.available_width() - chip_reserve).max(40.0);
+                    let text_width = ui.available_width().max(40.0);
                     ui.allocate_ui_with_layout(
                         Vec2::new(text_width, ui.available_height()),
                         Layout::left_to_right(Align::Center),
@@ -915,11 +940,6 @@ impl ClipApp {
                             });
                         },
                     );
-                    if versions > 0 {
-                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            theme::version_chip(ui, versions);
-                        });
-                    }
                 });
             },
         );
@@ -1708,29 +1728,27 @@ impl ClipApp {
                             );
                         } else {
                             let selected_text = selected
-                                .map(|option| {
-                                    format!(
-                                        "{}  ·  ~{}",
-                                        option.quality_label(),
-                                        format_file_size(option.estimated_bytes)
-                                    )
-                                })
+                                .map(quality_choice_label)
                                 .unwrap_or_else(|| "Choose quality".into());
                             egui::ComboBox::from_id_salt("publish-quality")
                                 .width(ui.available_width())
                                 .selected_text(selected_text)
                                 .show_ui(ui, |ui| {
                                     for option in options {
-                                        let label = format!(
-                                            "{}  ·  ~{}",
-                                            option.quality_label(),
-                                            format_file_size(option.estimated_bytes)
-                                        );
                                         let is_selected = self.editor.as_ref().is_some_and(|editor| {
                                             editor.export_height == option.height
                                                 && editor.export_fps == option.fps
                                         });
-                                        if ui.selectable_label(is_selected, label).clicked() {
+                                        let response = ui.selectable_label(
+                                            is_selected,
+                                            quality_choice_label(option),
+                                        );
+                                        if option.heavier_than_1080p120() {
+                                            response.clone().on_hover_text(
+                                                "High bandwidth quality — some slower connections may struggle to play this back smoothly.",
+                                            );
+                                        }
+                                        if response.clicked() {
                                             let height = option.height;
                                             let fps = option.fps;
                                             if let Some(editor) = &mut self.editor {
@@ -1752,12 +1770,23 @@ impl ClipApp {
                                     .color(theme::MUTED)
                                     .size(12.0),
                                 );
+                                if option.heavier_than_1080p120() {
+                                    ui.label(
+                                        RichText::new(
+                                            "You've selected a high bandwidth quality which some slower connections may struggle to play back smoothly.",
+                                        )
+                                        .color(theme::ACCENT)
+                                        .size(12.0),
+                                    );
+                                }
                             }
                         }
                     }
                     ui.add_space(8.0);
-                    let can_publish =
-                        self.config.authenticated && !self.busy && selected.is_some();
+                    let can_publish = self.config.authenticated
+                        && !self.busy
+                        && selected.is_some()
+                        && self.publish_modal.is_none();
                     let button_label = selected
                         .map(|option| format!("Publish {}", option.quality_label()))
                         .unwrap_or_else(|| "Publish".into());
@@ -1779,21 +1808,18 @@ impl ClipApp {
                         .clicked()
                     {
                         if let (Some(editor), Some(option)) = (&self.editor, selected) {
-                            match self.engine.publish_clip(
-                                clip.id.clone(),
-                                Selection {
+                            self.publish_modal = Some(PublishModal::Name {
+                                clip_id: clip.id.clone(),
+                                title: default_clip_title(&clip.name),
+                                selection: Selection {
                                     start: editor.start,
                                     end: editor.end,
                                     audio_stream_indexes: editor.tracks.clone(),
                                     export: Some(option.profile()),
                                 },
-                            ) {
-                                Ok(_) => {
-                                    self.dismiss_notice();
-                                    self.reload_library();
-                                }
-                                Err(error) => self.set_error(format!("{error:#}")),
-                            }
+                                quality_label: option.quality_label(),
+                                focus_title: true,
+                            });
                         }
                     }
                     ui.add_space(6.0);
@@ -1848,7 +1874,7 @@ impl ClipApp {
                                 ui.label(RichText::new(url.clone()).small().color(theme::MUTED));
                                 ui.horizontal(|ui| {
                                     if ui.button("Copy link").clicked() {
-                                        copy_text(url);
+                                        ui.ctx().copy_text(url.clone());
                                         self.set_notice("Published link copied.");
                                     }
                                     if ui.button("Open").clicked() {
@@ -1857,12 +1883,7 @@ impl ClipApp {
                                     if job.status == "complete"
                                         && ui.button("Delete version").clicked()
                                     {
-                                        let engine = self.engine.clone();
-                                        let id = job.id.clone();
-                                        self.run_async(async move {
-                                            engine.delete_job(&id).await?;
-                                            Ok(Message::Refresh)
-                                        });
+                                        self.pending_delete_job = Some(job.id.clone());
                                     }
                                 });
                             }
@@ -2376,6 +2397,252 @@ impl ClipApp {
         });
     }
 
+    fn publish_flow_modal(&mut self, ctx: &egui::Context) {
+        let Some(modal) = self.publish_modal.clone() else {
+            return;
+        };
+        let job = match &modal {
+            PublishModal::Job { id } => self.jobs.iter().find(|job| job.id == *id).cloned(),
+            PublishModal::Name { .. } => None,
+        };
+        let in_progress = job.as_ref().is_some_and(|job| {
+            matches!(job.status.as_str(), "queued" | "transcoding" | "uploading")
+        });
+        let title = match (&modal, job.as_ref()) {
+            (PublishModal::Name { .. }, _) => "Name this clip",
+            (_, Some(job)) if job.status == "complete" => "Published",
+            (_, Some(job)) if job.status == "failed" => "Publish failed",
+            _ => "Publishing",
+        };
+        let mut open = true;
+        let mut window = egui::Window::new(title)
+            .id(egui::Id::new("publish-flow"))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO);
+        if !in_progress {
+            window = window.open(&mut open);
+        }
+        window.show(ctx, |ui| {
+            ui.set_width(360.0);
+            match &modal {
+                PublishModal::Name {
+                    quality_label,
+                    ..
+                } => {
+                    ui.label(
+                        RichText::new(format!("Publishing {quality_label}. Share links expire in 30 days."))
+                            .color(theme::MUTED)
+                            .size(12.5),
+                    );
+                    ui.add_space(6.0);
+                    ui.label("Clip name");
+                    let PublishModal::Name {
+                        title,
+                        focus_title,
+                        ..
+                    } = self.publish_modal.as_mut().unwrap()
+                    else {
+                        return;
+                    };
+                    let response = ui.add(
+                        egui::TextEdit::singleline(title)
+                            .desired_width(ui.available_width())
+                            .char_limit(160),
+                    );
+                    if *focus_title {
+                        response.request_focus();
+                        *focus_title = false;
+                    }
+                    let submitted = response.lost_focus()
+                        && ui.input(|input| input.key_pressed(egui::Key::Enter));
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Cancel").clicked() {
+                            self.publish_modal = None;
+                        }
+                        let can_confirm = self
+                            .publish_modal
+                            .as_ref()
+                            .and_then(|modal| match modal {
+                                PublishModal::Name { title, .. } => Some(!title.trim().is_empty()),
+                                _ => None,
+                            })
+                            .unwrap_or(false);
+                        if ui
+                            .add_enabled(
+                                can_confirm,
+                                egui::Button::new(
+                                    RichText::new("Publish")
+                                        .color(theme::INK)
+                                        .family(theme::medium()),
+                                )
+                                .fill(if can_confirm {
+                                    theme::ACCENT
+                                } else {
+                                    theme::LINE
+                                }),
+                            )
+                            .clicked()
+                            || (submitted && can_confirm)
+                        {
+                            self.confirm_publish();
+                        }
+                    });
+                }
+                PublishModal::Job { .. } => {
+                    let Some(job) = job else {
+                        ui.label(
+                            RichText::new("Starting export…")
+                                .color(theme::MUTED)
+                                .size(12.5),
+                        );
+                        ui.add_space(8.0);
+                        theme::progress_bar(ui, 0.0);
+                        return;
+                    };
+                    if job.status == "complete" {
+                        ui.label("Your clip is live. Copy the link to share it.");
+                        if let Some(url) = &job.url {
+                            ui.label(RichText::new(url.clone()).small().color(theme::MUTED));
+                            ui.add_space(8.0);
+                            ui.horizontal(|ui| {
+                                if ui
+                                    .add(
+                                        egui::Button::new(
+                                            RichText::new("Copy link")
+                                                .color(theme::INK)
+                                                .family(theme::medium()),
+                                        )
+                                        .fill(theme::ACCENT),
+                                    )
+                                    .clicked()
+                                {
+                                    ui.ctx().copy_text(url.clone());
+                                    self.set_notice("Published link copied.");
+                                }
+                                if ui.button("Done").clicked() {
+                                    self.publish_modal = None;
+                                }
+                            });
+                        } else if ui.button("Done").clicked() {
+                            self.publish_modal = None;
+                        }
+                    } else if job.status == "failed" {
+                        ui.colored_label(
+                            theme::DANGER,
+                            job.error
+                                .clone()
+                                .unwrap_or_else(|| "Publishing failed.".into()),
+                        );
+                        ui.add_space(8.0);
+                        if ui.button("Close").clicked() {
+                            self.publish_modal = None;
+                        }
+                    } else {
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new(publish_stage_label(&job))
+                                    .family(theme::medium())
+                                    .color(theme::ACCENT),
+                            );
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                ui.label(
+                                    RichText::new(format!("{:.0}%", job.progress * 100.0))
+                                        .monospace()
+                                        .color(theme::TEXT),
+                                );
+                            });
+                        });
+                        ui.add_space(6.0);
+                        theme::progress_bar(ui, job.progress as f32);
+                        ui.add_space(2.0);
+                        ui.label(
+                            RichText::new("Keep this window open until the upload finishes.")
+                                .color(theme::MUTED)
+                                .size(12.0),
+                        );
+                    }
+                }
+            }
+        });
+        if !open {
+            self.publish_modal = None;
+        }
+    }
+
+    fn confirm_publish(&mut self) {
+        let Some(PublishModal::Name {
+            clip_id,
+            title,
+            selection,
+            ..
+        }) = self.publish_modal.clone()
+        else {
+            return;
+        };
+        let title = title.trim().to_string();
+        if title.is_empty() {
+            return;
+        }
+        match self.engine.publish_clip(clip_id, title, selection) {
+            Ok(job) => {
+                self.publish_modal = Some(PublishModal::Job { id: job.id });
+                self.dismiss_notice();
+                self.reload_library();
+            }
+            Err(error) => self.set_error(format!("{error:#}")),
+        }
+    }
+
+    fn delete_version_modal(&mut self, ctx: &egui::Context) {
+        let Some(id) = self.pending_delete_job.clone() else {
+            return;
+        };
+        let mut open = true;
+        egui::Window::new("Delete version")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
+            .show(ctx, |ui| {
+                ui.set_max_width(360.0);
+                ui.label("Are you sure you want to delete this published version?");
+                ui.label(
+                    RichText::new("The public link will stop working and this cannot be undone.")
+                        .color(theme::MUTED)
+                        .size(12.5),
+                );
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Cancel").clicked() {
+                        self.pending_delete_job = None;
+                    }
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                RichText::new("Delete version")
+                                    .color(theme::INK)
+                                    .family(theme::medium()),
+                            )
+                            .fill(theme::DANGER),
+                        )
+                        .clicked()
+                    {
+                        let engine = self.engine.clone();
+                        self.pending_delete_job = None;
+                        self.run_async(async move {
+                            engine.delete_job(&id).await?;
+                            Ok(Message::Refresh)
+                        });
+                    }
+                });
+            });
+        if !open {
+            self.pending_delete_job = None;
+        }
+    }
+
     fn reset_modal(&mut self, ctx: &egui::Context) {
         let Some(reset) = self.created_reset.clone() else {
             return;
@@ -2388,13 +2655,52 @@ impl ClipApp {
                 ui.label(format!("Single use · expires {}", reset.expires_at));
                 ui.text_edit_multiline(&mut reset.url.clone());
                 if ui.button("Copy link").clicked() {
-                    copy_text(&reset.url);
+                    ui.ctx().copy_text(reset.url.clone());
                     self.set_notice("Private link copied.");
                 }
             });
         if !open {
             self.created_reset = None;
         }
+    }
+}
+
+fn quality_choice_label(option: &PublishOption) -> String {
+    let label = format!(
+        "{}  ·  ~{}",
+        option.quality_label(),
+        format_file_size(option.estimated_bytes)
+    );
+    if option.heavier_than_1080p120() {
+        format!("{label}  ⚠")
+    } else {
+        label
+    }
+}
+
+fn default_clip_title(name: &str) -> String {
+    Path::new(name)
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("Untitled clip")
+        .to_string()
+}
+
+fn publish_stage_label(job: &PublishJob) -> String {
+    match job.status.as_str() {
+        "queued" => "Queued".into(),
+        "transcoding" => job
+            .selection
+            .as_ref()
+            .and_then(|selection| selection.export.as_ref())
+            .map(|profile| format!("Exporting {}p{}", profile.height, profile.fps))
+            .unwrap_or_else(|| "Exporting".into()),
+        "uploading" => "Uploading".into(),
+        "complete" => "Published".into(),
+        "failed" => "Failed".into(),
+        _ => "Working".into(),
     }
 }
 
@@ -2411,12 +2717,6 @@ fn clip_belongs_in_inbox(path: &Path, inbox: &Path, default_inbox: Option<&Path>
         }
     }
     true
-}
-
-fn copy_text(value: &str) {
-    if let Ok(mut clipboard) = arboard::Clipboard::new() {
-        let _ = clipboard.set_text(value);
-    }
 }
 
 fn format_duration_compact(seconds: f64) -> String {

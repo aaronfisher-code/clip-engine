@@ -293,6 +293,7 @@ impl Engine {
     pub fn publish_clip(
         &self,
         clip_id: String,
+        title: String,
         selection: Selection,
     ) -> anyhow::Result<PublishJob> {
         if !self.cloud.authenticated() {
@@ -327,8 +328,16 @@ impl Engine {
             clip.fps,
             &selection,
         )?);
+        let title = {
+            let trimmed = title.trim();
+            if trimmed.is_empty() {
+                "Untitled clip".to_string()
+            } else {
+                trimmed.chars().take(160).collect::<String>()
+            }
+        };
         let id = uuid::Uuid::new_v4().to_string();
-        let output_name = format!("{}-{}.mp4", media::safe_base_name(&clip.name), &id[..8]);
+        let output_name = format!("{}-{}.mp4", media::safe_base_name(&title), &id[..8]);
         let job = PublishJob {
             id,
             clip_id,
@@ -349,7 +358,7 @@ impl Engine {
         let engine = self.clone();
         let task_job = job.clone();
         self.spawn(async move {
-            run_publish(engine, clip, task_job).await;
+            run_publish(engine, clip, task_job, title).await;
         });
         Ok(job)
     }
@@ -464,7 +473,7 @@ fn supported(path: &Path) -> bool {
         })
 }
 
-async fn run_publish(engine: Engine, clip: Clip, mut job: PublishJob) {
+async fn run_publish(engine: Engine, clip: Clip, mut job: PublishJob, title: String) {
     let result: anyhow::Result<()> = async {
         let selection = job
             .selection
@@ -505,11 +514,7 @@ async fn run_publish(engine: Engine, clip: Clip, mut job: PublishJob) {
         let created = engine
             .cloud
             .create_upload(&UploadIntent {
-                title: Path::new(&clip.name)
-                    .file_stem()
-                    .unwrap_or_default()
-                    .to_str()
-                    .unwrap_or("Untitled clip"),
+                title: &title,
                 video_size,
                 thumbnail_size,
                 duration: selection.end - selection.start,

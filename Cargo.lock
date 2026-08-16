@@ -1073,7 +1073,6 @@ name = "clip-engine"
 version = "1.0.0"
 dependencies = [
  "anyhow",
- "arboard",
  "chrono",
  "clip-engine-core",
  "eframe",

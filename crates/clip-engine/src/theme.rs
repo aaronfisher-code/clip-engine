@@ -154,25 +154,41 @@ pub fn inset() -> Frame {
         .inner_margin(Margin::symmetric(10, 8))
 }
 
-pub fn version_chip(ui: &mut Ui, count: usize) -> egui::Response {
-    let label = format!("×{count}");
-    Frame::NONE
-        .fill(Color32::from_rgba_unmultiplied(232, 176, 74, 22))
-        .stroke(Stroke::new(1.0, ACCENT.gamma_multiply(0.4)))
-        .corner_radius(8)
-        .inner_margin(Margin::symmetric(5, 1))
-        .show(ui, |ui| {
-            ui.spacing_mut().item_spacing = Vec2::ZERO;
-            ui.label(
-                egui::RichText::new(label)
-                    .size(10.0)
-                    .color(ACCENT)
-                    .family(medium()),
-            );
-        })
-        .response
+pub fn published_tick_overlay(ui: &Ui, thumb: Rect, count: usize) -> egui::Response {
+    let size = 15.0;
+    let pad = 3.0;
+    let badge = Rect::from_center_size(
+        Pos2::new(
+            thumb.right() - pad - size * 0.5,
+            thumb.bottom() - pad - size * 0.5,
+        ),
+        Vec2::splat(size),
+    );
+    let painter = ui.painter();
+    painter.circle_filled(
+        badge.center(),
+        size * 0.5,
+        Color32::from_rgba_unmultiplied(12, 16, 14, 210),
+    );
+    let stroke = Stroke::new(1.6, OK.gamma_multiply(0.92));
+    let c = badge.center();
+    painter.line_segment(
+        [
+            Pos2::new(c.x - 3.5, c.y + 0.4),
+            Pos2::new(c.x - 1.1, c.y + 2.8),
+        ],
+        stroke,
+    );
+    painter.line_segment(
+        [
+            Pos2::new(c.x - 1.1, c.y + 2.8),
+            Pos2::new(c.x + 3.7, c.y - 2.7),
+        ],
+        stroke,
+    );
+    ui.interact(badge, ui.id().with("published-tick"), Sense::hover())
         .on_hover_text(if count == 1 {
-            "1 published version".into()
+            "Uploaded".into()
         } else {
             format!("{count} published versions")
         })

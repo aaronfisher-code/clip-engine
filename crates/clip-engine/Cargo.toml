@@ -10,7 +10,6 @@ default-run = "clip-engine"
 
 [dependencies]
 anyhow = "1"
-arboard = "3"
 chrono = { version = "0.4", features = ["serde"] }
 clip-engine-core = { path = "../clip-engine-core" }
 eframe = { version = "0.32", default-features = false, features = ["accesskit", "default_fonts", "wayland", "x11", "glow"] }
