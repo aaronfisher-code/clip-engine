@@ -164,6 +164,7 @@ pub struct ClipApp {
     available_update: Option<AvailableUpdate>,
     update_modal: Option<UpdateModal>,
     update_checking: bool,
+    show_pending: bool,
 }
 
 impl ClipApp {
@@ -252,6 +253,7 @@ impl ClipApp {
                     available_update: None,
                     update_modal: None,
                     update_checking: false,
+                    show_pending: false,
                 };
                 app.schedule_update_check(false);
                 return app;
@@ -305,6 +307,7 @@ impl ClipApp {
             available_update: None,
             update_modal: None,
             update_checking: false,
+            show_pending: false,
         };
         app.bootstrap_session();
         app.ensure_valid_selection();
@@ -484,11 +487,14 @@ impl ClipApp {
                     self.user = Some(user);
                     self.show_auth = None;
                     self.access_request = None;
+                    self.show_pending = false;
                     self.config = self.engine.config().unwrap_or(self.config.clone());
                     self.busy = false;
                 }
                 Message::LoggedOut => {
                     self.user = None;
+                    self.access_request = None;
+                    self.show_pending = false;
                     self.cloud_clips.clear();
                     self.show_auth = Some(AuthMode::Login);
                     self.config = self.engine.config().unwrap_or(self.config.clone());
@@ -498,7 +504,10 @@ impl ClipApp {
                 Message::AccessRequest(request) => {
                     self.access_request = request;
                     if self.access_request.is_none() {
+                        self.show_pending = false;
                         self.show_auth = Some(AuthMode::Request);
+                    } else {
+                        self.show_pending = true;
                     }
                     self.config = self.engine.config().unwrap_or(self.config.clone());
                     self.busy = false;
@@ -736,7 +745,9 @@ impl eframe::App for ClipApp {
                         if ui.button(label).clicked() {
                             if self.config.authenticated {
                                 self.account_open = !self.account_open;
-                            } else if self.access_request.is_none() {
+                            } else if self.access_request.is_some() {
+                                self.show_pending = true;
+                            } else {
                                 self.show_auth = Some(AuthMode::Login);
                             }
                         }
@@ -778,12 +789,7 @@ impl eframe::App for ClipApp {
                                 RichText::new(format!("@{}", user.username)).color(theme::MUTED),
                             );
                             if ui.button("Sign out this device").clicked() {
-                                let engine = self.engine.clone();
-                                self.account_open = false;
-                                self.run_async(async move {
-                                    engine.logout().await?;
-                                    Ok(Message::LoggedOut)
-                                });
+                                self.sign_out_this_device();
                             }
                         });
                     }
@@ -827,7 +833,11 @@ impl eframe::App for ClipApp {
         if self.show_auth.is_some() {
             self.auth_modal(ctx);
         }
-        if self.access_request.is_some() && !self.config.authenticated && self.show_auth.is_none() {
+        if self.show_pending
+            && self.access_request.is_some()
+            && !self.config.authenticated
+            && self.show_auth.is_none()
+        {
             self.pending_modal(ctx);
         }
         if self.show_access {
@@ -2460,6 +2470,9 @@ impl ClipApp {
                             .color(theme::MUTED)
                             .size(12.0),
                     );
+                    if access_pending && ui.button("Sign out this device").clicked() {
+                        self.sign_out_this_device();
+                    }
                 }
             } else if self.forgot_step == 1 {
                 ui.label("Username");
@@ -2548,19 +2561,34 @@ impl ClipApp {
         }
     }
 
+    fn sign_out_this_device(&mut self) {
+        let engine = self.engine.clone();
+        self.account_open = false;
+        self.show_pending = false;
+        self.access_request = None;
+        self.show_auth = None;
+        self.run_async(async move {
+            engine.logout().await?;
+            Ok(Message::LoggedOut)
+        });
+    }
+
     fn pending_modal(&mut self, ctx: &egui::Context) {
         let Some(request) = self.access_request.clone() else {
             return;
         };
+        let mut open = true;
         egui::Window::new("Publishing access status")
             .collapsible(false)
             .resizable(false)
+            .open(&mut open)
             .show(ctx, |ui| {
                 ui.label(format!("@{}", request.username));
                 match request.status.as_str() {
                     "approved" => {
                         ui.heading("Your access was approved");
                         if ui.button("Sign in").clicked() {
+                            self.show_pending = false;
                             self.show_auth = Some(AuthMode::Login);
                         }
                     }
@@ -2569,22 +2597,31 @@ impl ClipApp {
                         if ui.button("Start over").clicked() {
                             let _ = self.engine.clear_access_request();
                             self.access_request = None;
+                            self.show_pending = false;
                             self.show_auth = Some(AuthMode::Request);
                         }
                     }
                     _ => {
                         ui.heading("Awaiting owner approval");
-                        if ui.button("Check status").clicked() {
-                            let engine = self.engine.clone();
-                            self.run_async(async move {
-                                Ok(Message::AccessRequest(Some(
-                                    engine.access_request_status().await?,
-                                )))
-                            });
-                        }
+                        ui.horizontal(|ui| {
+                            if ui.button("Check status").clicked() {
+                                let engine = self.engine.clone();
+                                self.run_async(async move {
+                                    Ok(Message::AccessRequest(Some(
+                                        engine.access_request_status().await?,
+                                    )))
+                                });
+                            }
+                            if ui.button("Sign out this device").clicked() {
+                                self.sign_out_this_device();
+                            }
+                        });
                     }
                 }
             });
+        if !open {
+            self.show_pending = false;
+        }
     }
 
     fn access_modal(&mut self, ctx: &egui::Context) {

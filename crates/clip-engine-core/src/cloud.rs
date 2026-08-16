@@ -229,7 +229,8 @@ impl CloudClient {
                 .send::<(), serde_json::Value>(Method::POST, "/v1/auth/logout", None, true)
                 .await;
         }
-        self.clear_token()
+        self.clear_token()?;
+        self.clear_access_request()
     }
 
     async fn send<I: Serialize + ?Sized, O: DeserializeOwned>(
