@@ -1,6 +1,6 @@
-# Clip Engine
+# Dabs Clip Engine
 
-Clip Engine is a local-first Windows and Linux desktop app for trimming recordings,
+Dabs Clip Engine is a local-first Windows and Linux desktop app for trimming recordings,
 mixing audio tracks, transcoding with the local GPU or CPU, and publishing public
 30-day clip links. Publishing requires owner approval and can be revoked at any time.
 

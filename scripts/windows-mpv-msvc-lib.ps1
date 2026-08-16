@@ -96,6 +96,9 @@ if (-not $dll) {
 
 New-Item -ItemType Directory -Force (Split-Path $DllDestination) | Out-Null
 Copy-Item $dll.FullName $DllDestination -Force
+Get-ChildItem -Path $dll.DirectoryName -Filter "*.dll" | ForEach-Object {
+    Copy-Item $_.FullName (Join-Path (Split-Path $DllDestination) $_.Name) -Force
+}
 
 $libDir = $dll.DirectoryName
 $exports = Get-PeExports $dll.FullName

@@ -223,7 +223,7 @@ jobs:
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.prepare.outputs.tag }}
-          name: Clip Engine ${{ needs.prepare.outputs.tag }}
+          name: Dabs Clip Engine ${{ needs.prepare.outputs.tag }}
           draft: ${{ needs.prepare.outputs.draft == 'true' }}
           make_latest: ${{ needs.prepare.outputs.draft != 'true' }}
           generate_release_notes: true

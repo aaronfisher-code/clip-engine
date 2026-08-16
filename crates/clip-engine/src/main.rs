@@ -1,4 +1,4 @@
-use clip_engine_core::Engine;
+use clip_engine_core::{Engine, PRODUCT_NAME};
 use eframe::egui::{IconData, ViewportBuilder};
 use eframe::Renderer;
 use std::sync::Arc;
@@ -10,7 +10,8 @@ mod theme;
 
 fn main() -> eframe::Result<()> {
     let runtime = Runtime::new().expect("tokio runtime");
-    let engine = Engine::initialize(runtime.handle().clone()).expect("initialize Clip Engine");
+    let engine = Engine::initialize(runtime.handle().clone())
+        .unwrap_or_else(|error| panic!("initialize {PRODUCT_NAME}: {error}"));
     let _keep_alive = runtime;
     let icon = load_icon();
     #[allow(unused_mut)]
@@ -18,7 +19,7 @@ fn main() -> eframe::Result<()> {
         viewport: ViewportBuilder::default()
             .with_inner_size([1440.0, 900.0])
             .with_min_inner_size([900.0, 620.0])
-            .with_title("DAB Clip Engine")
+            .with_title(PRODUCT_NAME)
             .with_app_id("dev.dab.clip-engine")
             .with_drag_and_drop(true)
             .with_icon(icon),

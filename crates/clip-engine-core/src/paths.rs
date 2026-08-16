@@ -86,7 +86,14 @@ pub fn data_dir() -> anyhow::Result<PathBuf> {
 }
 
 pub fn default_inbox_dir() -> anyhow::Result<PathBuf> {
-    Ok(video_dir()?.join("Clip Engine").join("Inbox"))
+    let videos = video_dir()?;
+    let branded = videos.join(crate::PRODUCT_NAME).join("Inbox");
+    let legacy = videos.join("Clip Engine").join("Inbox");
+    if branded.exists() || !legacy.exists() {
+        Ok(branded)
+    } else {
+        Ok(legacy)
+    }
 }
 
 pub fn path_is_within(path: &Path, directory: &Path) -> bool {

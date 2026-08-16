@@ -419,9 +419,9 @@ mod tests {
     #[test]
     fn windows_picks_nsis_setup() {
         let assets = vec![
-            asset("Clip Engine_1.0.1_amd64.AppImage"),
-            asset("Clip Engine_1.0.1_x64-setup.exe"),
-            asset("Clip Engine_1.0.1_amd64.deb"),
+            asset("Dabs Clip Engine_1.0.1_amd64.AppImage"),
+            asset("Dabs Clip Engine_1.0.1_x64-setup.exe"),
+            asset("Dabs Clip Engine_1.0.1_amd64.deb"),
             asset("latest.json"),
         ];
         let selected = select_asset(&assets, "windows", "x86_64").unwrap();
@@ -432,9 +432,9 @@ mod tests {
     #[test]
     fn linux_prefers_appimage_over_deb() {
         let assets = vec![
-            asset("Clip Engine_1.0.1_amd64.deb"),
-            asset("Clip Engine_1.0.1_amd64.AppImage"),
-            asset("Clip Engine_1.0.1_x64-setup.exe"),
+            asset("Dabs Clip Engine_1.0.1_amd64.deb"),
+            asset("Dabs Clip Engine_1.0.1_amd64.AppImage"),
+            asset("Dabs Clip Engine_1.0.1_x64-setup.exe"),
         ];
         let selected = select_asset(&assets, "linux", "x86_64").unwrap();
         assert!(selected.name.ends_with(".AppImage"));
@@ -452,7 +452,7 @@ mod tests {
             body: Some("Fixes playback.".into()),
             draft: false,
             prerelease: false,
-            assets: vec![asset("Clip Engine_1.2.0_x64-setup.exe")],
+            assets: vec![asset("Dabs Clip Engine_1.2.0_x64-setup.exe")],
         };
         let update = available_from_release(&release, "1.0.0", "windows", "x86_64")
             .unwrap()
@@ -470,7 +470,7 @@ mod tests {
             body: None,
             draft: false,
             prerelease: false,
-            assets: vec![asset("Clip Engine_1.0.0_x64-setup.exe")],
+            assets: vec![asset("Dabs Clip Engine_1.0.0_x64-setup.exe")],
         };
         assert!(
             available_from_release(&release, "1.0.0", "windows", "x86_64")

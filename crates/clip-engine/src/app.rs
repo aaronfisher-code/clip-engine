@@ -5,7 +5,7 @@ use clip_engine_core::models::{AppConfig, Clip, PublishJob, Selection};
 use clip_engine_core::paths::{default_inbox_dir, path_is_within, video_dir};
 use clip_engine_core::{
     export_options, format_file_size, install_desktop_update, safe_base_name, AvailableUpdate,
-    Engine, PublishOption,
+    Engine, PublishOption, APP_NAME, PRODUCT_NAME,
 };
 use eframe::egui::{
     self, Align, Color32, ColorImage, CornerRadius, CursorIcon, Layout, Pos2, Rect, RichText,
@@ -544,7 +544,8 @@ impl ClipApp {
                             self.available_update = None;
                             if manual {
                                 self.set_notice(format!(
-                                    "Clip Engine {} is current.",
+                                    "{} {} is current.",
+                                    APP_NAME,
                                     Engine::current_version()
                                 ));
                             }
@@ -708,7 +709,7 @@ impl eframe::App for ClipApp {
                     ui.vertical(|ui| {
                         ui.add_space(2.0);
                         ui.label(
-                            RichText::new("DAB Clip Engine")
+                            RichText::new(PRODUCT_NAME)
                                 .family(theme::medium())
                                 .size(16.0),
                         );
@@ -943,7 +944,7 @@ impl ClipApp {
                     ui.set_min_width(ui.available_width());
                     ui.horizontal(|ui| {
                         ui.label(
-                            RichText::new(format!("Clip Engine {} is ready.", update.version))
+                            RichText::new(format!("{} {} is ready.", APP_NAME, update.version))
                                 .family(theme::medium())
                                 .color(theme::ACCENT),
                         );
@@ -2972,7 +2973,7 @@ impl ClipApp {
         };
         let blocking = !matches!(modal, UpdateModal::Prompt);
         let mut open = true;
-        let mut window = egui::Window::new(format!("Clip Engine {}", update.version))
+        let mut window = egui::Window::new(format!("{} {}", APP_NAME, update.version))
             .id(egui::Id::new("update-flow"))
             .collapsible(false)
             .resizable(false)
@@ -3060,7 +3061,7 @@ impl ClipApp {
                 }
                 UpdateModal::Installing => {
                     ui.label(
-                        RichText::new("The installer is starting. Clip Engine will close.")
+                        RichText::new(format!("The installer is starting. {APP_NAME} will close."))
                             .color(theme::MUTED),
                     );
                 }
@@ -3180,7 +3181,9 @@ impl ClipApp {
                 ));
                 ui.label(
                     RichText::new(
-                        "This only removes it from Clip Engine. The original recording on disk is not deleted.",
+                        format!(
+                            "This only removes it from {APP_NAME}. The original recording on disk is not deleted."
+                        ),
                     )
                     .color(theme::MUTED)
                     .size(12.5),
