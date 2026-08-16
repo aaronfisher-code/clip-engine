@@ -244,3 +244,160 @@ pub fn buffering_overlay(ui: &Ui, rect: Rect) {
     );
     ui.ctx().request_repaint();
 }
+
+pub fn transport_icon_button(
+    ui: &mut Ui,
+    size: Vec2,
+    filled: bool,
+    tooltip: &str,
+    paint: impl FnOnce(&egui::Painter, Rect, Color32),
+) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+    let hovered = response.hovered();
+    let active = response.is_pointer_button_down_on();
+    let radius = CornerRadius::same(8);
+    let bg = if filled {
+        if active {
+            Color32::from_rgb(210, 154, 58)
+        } else if hovered {
+            Color32::from_rgb(242, 190, 92)
+        } else {
+            ACCENT
+        }
+    } else if active {
+        Color32::from_rgb(36, 40, 50)
+    } else if hovered {
+        CARD_HOVER
+    } else {
+        CARD
+    };
+    let stroke = if filled {
+        bg
+    } else if hovered || active {
+        ACCENT.gamma_multiply(0.7)
+    } else {
+        LINE
+    };
+    ui.painter().rect_filled(rect, radius, bg);
+    ui.painter().rect_stroke(
+        rect,
+        radius,
+        Stroke::new(1.0, stroke),
+        egui::StrokeKind::Inside,
+    );
+    paint(ui.painter(), rect, if filled { INK } else { ACCENT });
+    response.on_hover_text(tooltip)
+}
+
+pub fn paint_play_icon(painter: &egui::Painter, rect: Rect, color: Color32) {
+    let center = rect.center();
+    painter.add(Shape::convex_polygon(
+        vec![
+            Pos2::new(center.x - 6.0, center.y - 11.0),
+            Pos2::new(center.x - 6.0, center.y + 11.0),
+            Pos2::new(center.x + 12.0, center.y),
+        ],
+        color,
+        Stroke::NONE,
+    ));
+}
+
+pub fn paint_pause_icon(painter: &egui::Painter, rect: Rect, color: Color32) {
+    let center = rect.center();
+    painter.rect_filled(
+        Rect::from_center_size(Pos2::new(center.x - 6.0, center.y), Vec2::new(5.0, 18.0)),
+        CornerRadius::same(1),
+        color,
+    );
+    painter.rect_filled(
+        Rect::from_center_size(Pos2::new(center.x + 6.0, center.y), Vec2::new(5.0, 18.0)),
+        CornerRadius::same(1),
+        color,
+    );
+}
+
+pub fn paint_to_start_icon(painter: &egui::Painter, rect: Rect, color: Color32) {
+    let center = rect.center();
+    painter.rect_filled(
+        Rect::from_center_size(Pos2::new(center.x - 9.0, center.y), Vec2::new(3.0, 16.0)),
+        CornerRadius::same(1),
+        color,
+    );
+    painter.add(Shape::convex_polygon(
+        vec![
+            Pos2::new(center.x + 10.0, center.y - 9.0),
+            Pos2::new(center.x + 10.0, center.y + 9.0),
+            Pos2::new(center.x - 5.0, center.y),
+        ],
+        color,
+        Stroke::NONE,
+    ));
+}
+
+pub fn paint_trim_handle(
+    painter: &egui::Painter,
+    x: f32,
+    track: Rect,
+    is_in: bool,
+    active: bool,
+) {
+    let color = if active { TEXT } else { ACCENT };
+    let bar = Rect::from_min_max(
+        Pos2::new(x - 2.0, track.top()),
+        Pos2::new(x + 2.0, track.bottom()),
+    );
+    painter.rect_filled(bar, CornerRadius::same(2), color);
+
+    let cap_w = 18.0;
+    let cap_h = 20.0;
+    let cap = if is_in {
+        Rect::from_min_max(
+            Pos2::new(x - cap_w + 2.0, track.bottom() - 6.0),
+            Pos2::new(x + 2.0, track.bottom() - 6.0 + cap_h),
+        )
+    } else {
+        Rect::from_min_max(
+            Pos2::new(x - 2.0, track.bottom() - 6.0),
+            Pos2::new(x + cap_w - 2.0, track.bottom() - 6.0 + cap_h),
+        )
+    };
+    painter.rect_filled(cap, CornerRadius::same(4), color);
+    painter.rect_stroke(
+        cap,
+        CornerRadius::same(4),
+        Stroke::new(1.0, INK.gamma_multiply(0.35)),
+        egui::StrokeKind::Inside,
+    );
+    for index in 0..3 {
+        let gy = cap.top() + 6.0 + index as f32 * 4.0;
+        painter.line_segment(
+            [Pos2::new(cap.left() + 4.0, gy), Pos2::new(cap.right() - 4.0, gy)],
+            Stroke::new(1.4, INK),
+        );
+    }
+}
+
+pub fn paint_playhead(painter: &egui::Painter, x: f32, track: Rect) {
+    painter.rect_filled(
+        Rect::from_center_size(
+            Pos2::new(x, track.center().y),
+            Vec2::new(2.0, track.height()),
+        ),
+        CornerRadius::same(1),
+        TEXT,
+    );
+    let cap = Rect::from_center_size(
+        Pos2::new(x, track.top() - 6.0),
+        Vec2::new(14.0, 14.0),
+    );
+    painter.rect_filled(cap, CornerRadius::same(3), TEXT);
+    painter.add(Shape::convex_polygon(
+        vec![
+            Pos2::new(x - 7.0, track.top() + 1.0),
+            Pos2::new(x + 7.0, track.top() + 1.0),
+            Pos2::new(x, track.top() + 10.0),
+        ],
+        TEXT,
+        Stroke::NONE,
+    ));
+}

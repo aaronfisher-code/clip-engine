@@ -2,13 +2,15 @@ use crate::player::Player;
 use crate::theme;
 use clip_engine_core::cloud::{AccessRequest, AdminUser, CloudClip, CloudUser, PasswordReset};
 use clip_engine_core::models::{AppConfig, Clip, PublishJob, Selection};
+use clip_engine_core::paths::{default_inbox_dir, path_is_within};
 use clip_engine_core::Engine;
 use eframe::egui::{
-    self, Align, Color32, ColorImage, CornerRadius, Layout, Pos2, Rect, RichText, Sense,
-    StrokeKind, TextureHandle, TextureOptions, Ui, UiBuilder, Vec2,
+    self, Align, Color32, ColorImage, CornerRadius, CursorIcon, Layout, Pos2, Rect, RichText,
+    Sense, StrokeKind, TextureHandle, TextureOptions, Ui, UiBuilder, Vec2,
 };
 use raw_window_handle::HasDisplayHandle;
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
 
@@ -53,6 +55,25 @@ struct EditorState {
     muted: bool,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TimeField {
+    In,
+    Out,
+}
+
+struct TimeEdit {
+    field: TimeField,
+    text: String,
+    requested_focus: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TimelineDrag {
+    Playhead,
+    In,
+    Out,
+}
+
 pub struct ClipApp {
     engine: Engine,
     player: Option<Player>,
@@ -76,7 +97,9 @@ pub struct ClipApp {
     editor: Option<EditorState>,
     thumbs: HashMap<String, TextureHandle>,
     notice: Option<String>,
+    notice_until: Option<Instant>,
     error: Option<String>,
+    error_until: Option<Instant>,
     busy: bool,
     last_refresh: Instant,
     tx: Sender<Message>,
@@ -90,6 +113,8 @@ pub struct ClipApp {
     player_error: Option<String>,
     device_name: String,
     session_media: Option<String>,
+    timeline_drag: Option<TimelineDrag>,
+    time_edit: Option<TimeEdit>,
 }
 
 impl ClipApp {
@@ -120,9 +145,11 @@ impl ClipApp {
         });
         let clips = engine.clips().unwrap_or_default();
         let jobs = engine.jobs().unwrap_or_default();
-        let selected_id = clips.first().map(|clip| clip.id.clone());
+        let selected_id = None;
         for clip in &clips {
-            let _ = engine.prepare_preview(&clip.id, false);
+            if Path::new(&clip.source_path).is_file() {
+                let _ = engine.prepare_preview(&clip.id, false);
+            }
         }
         let clips = engine.clips().unwrap_or(clips);
         let player = match Player::new(
@@ -156,7 +183,9 @@ impl ClipApp {
                     editor: None,
                     thumbs: HashMap::new(),
                     notice: None,
+                    notice_until: None,
                     error: None,
+                    error_until: None,
                     busy: false,
                     last_refresh: Instant::now(),
                     tx,
@@ -169,6 +198,8 @@ impl ClipApp {
                     forgot_step: 0,
                     device_name: format!("{} desktop", std::env::consts::OS),
                     session_media: None,
+                    timeline_drag: None,
+                    time_edit: None,
                 };
             }
         };
@@ -195,7 +226,9 @@ impl ClipApp {
             editor: None,
             thumbs: HashMap::new(),
             notice: None,
+            notice_until: None,
             error: None,
+            error_until: None,
             busy: false,
             last_refresh: Instant::now(),
             tx,
@@ -209,8 +242,11 @@ impl ClipApp {
             player_error: None,
             device_name: format!("{} desktop", std::env::consts::OS),
             session_media: None,
+            timeline_drag: None,
+            time_edit: None,
         };
         app.bootstrap_session();
+        app.ensure_valid_selection();
         app
     }
 
@@ -261,15 +297,60 @@ impl ClipApp {
         }
     }
 
+    fn set_notice(&mut self, value: impl Into<String>) {
+        self.notice = Some(value.into());
+        self.notice_until = Some(Instant::now() + Duration::from_secs(5));
+    }
+
+    fn dismiss_notice(&mut self) {
+        self.notice = None;
+        self.notice_until = None;
+    }
+
+    fn set_error(&mut self, value: impl Into<String>) {
+        self.error = Some(value.into());
+        self.error_until = Some(Instant::now() + Duration::from_secs(5));
+    }
+
+    fn dismiss_error(&mut self) {
+        self.error = None;
+        self.error_until = None;
+    }
+
+    fn expire_toasts(&mut self, ctx: &egui::Context) {
+        if self.error_until.is_some() {
+            let remaining = self
+                .error_until
+                .unwrap()
+                .saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                self.dismiss_error();
+            } else {
+                ctx.request_repaint_after(remaining);
+            }
+        }
+        if self.notice_until.is_some() {
+            let remaining = self
+                .notice_until
+                .unwrap()
+                .saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                self.dismiss_notice();
+            } else {
+                ctx.request_repaint_after(remaining);
+            }
+        }
+    }
+
     fn pump(&mut self) {
         while let Ok(message) = self.rx.try_recv() {
             match message {
                 Message::Error(value) => {
-                    self.error = Some(value);
+                    self.set_error(value);
                     self.busy = false;
                 }
                 Message::Notice(value) => {
-                    self.notice = Some(value);
+                    self.set_notice(value);
                     self.busy = false;
                 }
                 Message::Refresh => {
@@ -331,8 +412,15 @@ impl ClipApp {
             .map(|clip| clip.id.clone())
             .collect::<Vec<_>>();
         for id in pending {
-            let _ = self.engine.prepare_preview(&id, false);
+            if self
+                .clips
+                .iter()
+                .any(|clip| clip.id == id && Path::new(&clip.source_path).is_file())
+            {
+                let _ = self.engine.prepare_preview(&id, false);
+            }
         }
+        self.ensure_valid_selection();
     }
 
     fn run_async<F>(&mut self, future: F)
@@ -340,7 +428,7 @@ impl ClipApp {
         F: std::future::Future<Output = Result<Message, anyhow::Error>> + Send + 'static,
     {
         self.busy = true;
-        self.error = None;
+        self.dismiss_error();
         let tx = self.tx.clone();
         self.engine.spawn(async move {
             let _ = tx.send(Message::Busy(true));
@@ -367,9 +455,18 @@ impl ClipApp {
 
     fn inbox_clips(&self) -> Vec<&Clip> {
         let published = self.published_map();
+        let inbox = PathBuf::from(&self.config.source_directory);
+        let default_inbox = default_inbox_dir().ok();
         self.clips
             .iter()
-            .filter(|clip| !published.contains_key(&clip.id))
+            .filter(|clip| {
+                !published.contains_key(&clip.id)
+                    && clip_belongs_in_inbox(
+                        Path::new(&clip.source_path),
+                        &inbox,
+                        default_inbox.as_deref(),
+                    )
+            })
             .collect()
     }
 
@@ -380,11 +477,39 @@ impl ClipApp {
             .filter(|clip| published.contains_key(&clip.id))
             .collect()
     }
+
+    fn visible_clips(&self) -> Vec<&Clip> {
+        if self.library_area == LibraryArea::Published {
+            self.published_clips()
+        } else {
+            self.inbox_clips()
+        }
+    }
+
+    fn ensure_valid_selection(&mut self) {
+        let visible = self
+            .visible_clips()
+            .into_iter()
+            .map(|clip| clip.id.clone())
+            .collect::<Vec<_>>();
+        if self
+            .selected_id
+            .as_ref()
+            .is_some_and(|id| visible.iter().any(|clip_id| clip_id == id))
+        {
+            return;
+        }
+        self.selected_id = visible.first().cloned();
+        self.editor = None;
+        self.time_edit = None;
+        self.bind_session_media(None);
+    }
 }
 
 impl eframe::App for ClipApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.pump();
+        self.expire_toasts(ctx);
         let previewing = self.clips.iter().any(|clip| {
             matches!(clip.preview_status.as_str(), "pending" | "processing")
         });
@@ -566,6 +691,8 @@ impl eframe::App for ClipApp {
             self.reset_modal(ctx);
         }
 
+        self.stop_at_out_point();
+
         if self.player.as_ref().is_some_and(|player| {
             player.playing() || player.buffering() || player.wants_redraw()
         }) {
@@ -620,13 +747,33 @@ impl ClipApp {
         if let Some(error) = self.error.clone() {
             theme::card().show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
-                ui.colored_label(theme::DANGER, error);
+                ui.horizontal(|ui| {
+                    ui.colored_label(theme::DANGER, error);
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if ui
+                            .add(egui::Button::new(RichText::new("Dismiss").size(12.0)))
+                            .clicked()
+                        {
+                            self.dismiss_error();
+                        }
+                    });
+                });
             });
             ui.add_space(8.0);
         } else if let Some(notice) = self.notice.clone() {
             theme::card().show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
-                ui.colored_label(theme::OK, notice);
+                ui.horizontal(|ui| {
+                    ui.colored_label(theme::OK, notice);
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if ui
+                            .add(egui::Button::new(RichText::new("Dismiss").size(12.0)))
+                            .clicked()
+                        {
+                            self.dismiss_notice();
+                        }
+                    });
+                });
             });
             ui.add_space(8.0);
         }
@@ -669,13 +816,36 @@ impl ClipApp {
         {
             self.import_recordings();
         }
-        ui.add_space(4.0);
+        ui.add_space(8.0);
         ui.label(
-            RichText::new(self.config.source_directory.clone())
-                .small()
+            RichText::new("Inbox folder")
                 .color(theme::MUTED)
-                .italics(),
+                .size(11.5),
         );
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if ui.button("Choose folder").clicked() {
+                    self.pick_inbox_folder();
+                }
+                let path = self.config.source_directory.clone();
+                let path_response = ui
+                    .add(
+                        egui::Label::new(
+                            RichText::new(path.clone())
+                                .small()
+                                .color(theme::MUTED)
+                                .italics(),
+                        )
+                        .truncate()
+                        .sense(Sense::click()),
+                    )
+                    .on_hover_text(&path);
+                if path_response.clicked() {
+                    self.pick_inbox_folder();
+                }
+            });
+        });
         ui.add_space(8.0);
         ui.horizontal(|ui| {
             self.library_tab(ui, LibraryArea::Inbox, &format!("Inbox {}", self.inbox_clips().len()));
@@ -718,6 +888,7 @@ impl ClipApp {
             };
             self.selected_id = first;
             self.editor = None;
+            self.time_edit = None;
             self.session_media = None;
             if let Some(player) = &mut self.player {
                 player.unload();
@@ -829,6 +1000,32 @@ impl ClipApp {
         }
     }
 
+    fn pick_inbox_folder(&mut self) {
+        let mut dialog = rfd::FileDialog::new().set_title("Choose inbox folder");
+        if !self.config.source_directory.is_empty() {
+            dialog = dialog.set_directory(PathBuf::from(&self.config.source_directory));
+        }
+        let Some(folder) = dialog.pick_folder() else {
+            return;
+        };
+        match self.engine.set_source_directory(folder) {
+            Ok(path) => {
+                self.config.source_directory = path.to_string_lossy().to_string();
+                self.set_notice(format!("Inbox set to {}", self.config.source_directory));
+                self.dismiss_error();
+                self.ensure_valid_selection();
+                let engine = self.engine.clone();
+                self.run_async(async move {
+                    engine.scan_clips().await?;
+                    Ok(Message::Refresh)
+                });
+            }
+            Err(error) => {
+                self.set_error(error.to_string());
+            }
+        }
+    }
+
     fn import_recordings(&mut self) {
         let files = rfd::FileDialog::new()
             .add_filter(
@@ -869,7 +1066,10 @@ impl ClipApp {
         };
         if let Some(player) = &mut self.player {
             if player.loaded_path() != Some(media.as_str()) {
-                let _ = player.load(&media);
+                if let Err(error) = player.load(&media) {
+                    self.set_error(error.to_string());
+                    return;
+                }
             }
             if play {
                 player.play();
@@ -885,7 +1085,7 @@ impl ClipApp {
                 player.pause();
             }
         } else {
-            self.activate_player(true);
+            self.start_playback();
         }
     }
 
@@ -893,7 +1093,33 @@ impl ClipApp {
         if self.player.as_ref().is_some_and(|player| player.wants_to_play()) {
             return;
         }
+        self.start_playback();
+    }
+
+    fn start_playback(&mut self) {
+        if let Some(editor) = &self.editor {
+            if self.playback_time() + 0.01 >= editor.end {
+                let start = editor.start;
+                self.activate_player(true);
+                if let Some(player) = &mut self.player {
+                    player.seek_and_play(start);
+                }
+                return;
+            }
+        }
         self.activate_player(true);
+    }
+
+    fn stop_at_out_point(&mut self) {
+        if self.timeline_drag.is_some() {
+            return;
+        }
+        let Some(end) = self.editor.as_ref().map(|editor| editor.end) else {
+            return;
+        };
+        if let Some(player) = &mut self.player {
+            player.stop_at(end);
+        }
     }
 
     fn step_frame(&mut self, delta: f64) {
@@ -903,8 +1129,131 @@ impl ClipApp {
         }
     }
 
+    fn seek_preview(&mut self, time: f64) {
+        self.activate_player(false);
+        if let Some(player) = &mut self.player {
+            player.seek(time);
+        }
+    }
+
+    fn seek_to_clip_start(&mut self) {
+        let start = self.editor.as_ref().map(|editor| editor.start).unwrap_or(0.0);
+        let playing = self.player.as_ref().is_some_and(|player| player.wants_to_play());
+        self.activate_player(playing);
+        if let Some(player) = &mut self.player {
+            if playing {
+                player.seek_and_play(start);
+            } else {
+                player.seek(start);
+            }
+        }
+    }
+
+    fn trim_time_value(&mut self, ui: &mut Ui, field: TimeField, displayed: &str, duration: f64) {
+        let editing = self.time_edit.as_ref().is_some_and(|edit| edit.field == field);
+        let (rect, _) = ui.allocate_exact_size(Vec2::new(100.0, 28.0), Sense::hover());
+        ui.scope_builder(UiBuilder::new().max_rect(rect), |ui| {
+            ui.centered_and_justified(|ui| {
+                if editing {
+                    self.trim_time_edit(ui, duration);
+                } else {
+                    self.trim_time_label(ui, field, displayed, duration);
+                }
+            });
+        });
+    }
+
+    fn trim_time_edit(&mut self, ui: &mut Ui, duration: f64) {
+        let mut text = self
+            .time_edit
+            .as_ref()
+            .map(|edit| edit.text.clone())
+            .unwrap_or_default();
+        let response = ui.add(
+            egui::TextEdit::singleline(&mut text)
+                .font(egui::FontId::monospace(13.0))
+                .desired_width(100.0)
+                .clip_text(false)
+                .horizontal_align(Align::Center)
+                .margin(egui::Margin::symmetric(6, 4)),
+        );
+        if let Some(edit) = &mut self.time_edit {
+            edit.text = text;
+        }
+        let already_focused = self
+            .time_edit
+            .as_ref()
+            .is_some_and(|edit| edit.requested_focus);
+        if !already_focused {
+            response.request_focus();
+            if let Some(edit) = &mut self.time_edit {
+                edit.requested_focus = true;
+            }
+        }
+        let enter = ui.input(|input| input.key_pressed(egui::Key::Enter));
+        let escape = ui.input(|input| input.key_pressed(egui::Key::Escape));
+        if escape {
+            self.time_edit = None;
+        } else if enter || (already_focused && response.lost_focus()) {
+            self.commit_time_edit(duration);
+        }
+    }
+
+    fn trim_time_label(&mut self, ui: &mut Ui, field: TimeField, displayed: &str, duration: f64) {
+        let response = ui
+            .add(
+                egui::Label::new(
+                    RichText::new(displayed)
+                        .monospace()
+                        .size(13.0)
+                        .color(theme::MUTED),
+                )
+                .sense(Sense::click()),
+            )
+            .on_hover_text("Click to edit time");
+        if response.hovered() {
+            ui.ctx().set_cursor_icon(CursorIcon::Text);
+        }
+        if response.clicked() || response.double_clicked() {
+            if self.time_edit.as_ref().is_some_and(|edit| edit.field != field) {
+                self.commit_time_edit(duration);
+            }
+            self.time_edit = Some(TimeEdit {
+                field,
+                text: displayed.to_string(),
+                requested_focus: false,
+            });
+        }
+    }
+
+    fn commit_time_edit(&mut self, duration: f64) {
+        let Some(edit) = self.time_edit.take() else {
+            return;
+        };
+        let Some(parsed) = parse_time(&edit.text) else {
+            return;
+        };
+        let time = {
+            let Some(editor) = &mut self.editor else {
+                return;
+            };
+            match edit.field {
+                TimeField::In => {
+                    editor.start = parsed.min(editor.end - 0.05).max(0.0);
+                    editor.start
+                }
+                TimeField::Out => {
+                    editor.end = parsed.max(editor.start + 0.05).min(duration);
+                    editor.end
+                }
+            }
+        };
+        self.seek_preview(time);
+    }
+
     fn watch_panel(&mut self, ui: &mut Ui, _ctx: &egui::Context, clip: &Clip) {
         self.editor = None;
+        self.time_edit = None;
         let Some(job) = self.published_map().get(&clip.id).cloned() else {
             ui.label("This clip does not have a published version yet.");
             return;
@@ -939,7 +1288,7 @@ impl ClipApp {
                         |ui| {
                             ui.set_width(stage_w);
                             ui.set_max_height(size.y);
-                            self.watch_stage(ui, clip, &job, duration, frame_step);
+                            self.watch_stage(ui, clip, &job, duration);
                         },
                     );
                     ui.allocate_ui_with_layout(
@@ -962,7 +1311,7 @@ impl ClipApp {
                 |ui| {
                     ui.set_width(size.x);
                     ui.set_min_height(stage_h);
-                    self.watch_stage(ui, clip, &job, duration, frame_step);
+                    self.watch_stage(ui, clip, &job, duration);
                 },
             );
             ui.add_space(10.0);
@@ -995,7 +1344,6 @@ impl ClipApp {
         clip: &Clip,
         job: &PublishJob,
         duration: f64,
-        frame_step: f64,
     ) {
         let width = ui.available_width();
         let height = ui.available_height();
@@ -1015,7 +1363,7 @@ impl ClipApp {
                 .size(12.0),
             );
             self.timeline(ui, duration, time);
-            self.editor_transport(ui, duration, frame_step, true);
+            self.editor_transport(ui, duration, true);
             let leftover = ui.available_size();
             ui.allocate_ui_with_layout(leftover, Layout::top_down(Align::Min), |ui| {
                 ui.set_width(width);
@@ -1076,7 +1424,7 @@ impl ClipApp {
                                 .clicked()
                             {
                                 copy_text(url);
-                                self.notice = Some("Published link copied.".into());
+                                self.set_notice("Published link copied.");
                             }
                             ui.add_space(6.0);
                             if ui
@@ -1127,6 +1475,27 @@ impl ClipApp {
                     .collect(),
                 muted: false,
             });
+            self.time_edit = None;
+        }
+        if !Path::new(&clip.source_path).is_file() {
+            self.bind_session_media(None);
+            ui.centered_and_justified(|ui| {
+                theme::card().show(ui, |ui| {
+                    ui.set_max_width(460.0);
+                    ui.label(
+                        RichText::new("Recording is missing from disk")
+                            .family(theme::medium())
+                            .size(18.0),
+                    );
+                    ui.add_space(6.0);
+                    ui.label(
+                        RichText::new(clip.source_path.clone())
+                            .color(theme::MUTED)
+                            .small(),
+                    );
+                });
+            });
+            return;
         }
         self.bind_session_media(Some(clip.source_path.clone()));
         let jobs = self
@@ -1164,7 +1533,7 @@ impl ClipApp {
                         |ui| {
                             ui.set_width(stage_w);
                             ui.set_max_height(size.y);
-                            self.editor_stage(ui, ctx, clip, frame_step);
+                            self.editor_stage(ui, ctx, clip);
                         },
                     );
                     ui.allocate_ui_with_layout(
@@ -1187,7 +1556,7 @@ impl ClipApp {
                 |ui| {
                     ui.set_width(size.x);
                     ui.set_min_height(stage_h);
-                    self.editor_stage(ui, ctx, clip, frame_step);
+                    self.editor_stage(ui, ctx, clip);
                 },
             );
             ui.add_space(10.0);
@@ -1195,7 +1564,8 @@ impl ClipApp {
         }
 
         let time = self.playback_time();
-        ui.input(|input| {
+        if !ctx.wants_keyboard_input() {
+            ui.input(|input| {
             if input.key_pressed(egui::Key::Space) {
                 self.toggle_playback();
             }
@@ -1225,10 +1595,11 @@ impl ClipApp {
                     editor.end = time.max(editor.start + 0.05).min(clip.duration);
                 }
             }
-        });
+            });
+        }
     }
 
-    fn editor_stage(&mut self, ui: &mut Ui, _ctx: &egui::Context, clip: &Clip, frame_step: f64) {
+    fn editor_stage(&mut self, ui: &mut Ui, _ctx: &egui::Context, clip: &Clip) {
         let width = ui.available_width();
         let height = ui.available_height();
         ui.set_min_width(width);
@@ -1237,32 +1608,72 @@ impl ClipApp {
         ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
             ui.set_width(width);
             ui.add_space(14.0);
-            ui.horizontal(|ui| {
-                if ui.button("I  Mark in").clicked() {
-                    if let Some(editor) = &mut self.editor {
-                        editor.start = time.min(editor.end - 0.05).max(0.0);
-                    }
-                }
-                if ui.button("O  Mark out").clicked() {
-                    if let Some(editor) = &mut self.editor {
-                        editor.end = time.max(editor.start + 0.05).min(clip.duration);
-                    }
-                }
-                if let Some(editor) = &self.editor {
-                    ui.label(
-                        RichText::new(format!(
-                            "{}  →  {}   ({})",
-                            format_time(editor.start),
-                            format_time(editor.end),
-                            format_time(editor.end - editor.start)
-                        ))
-                        .monospace()
-                        .size(13.0),
-                    );
-                }
+            let row_height = 34.0;
+            let row_width = ui.available_width().max(1.0);
+            let (row, _) = ui.allocate_exact_size(Vec2::new(row_width, row_height), Sense::hover());
+            let mut mark_in = false;
+            let mut mark_out = false;
+            let times = self
+                .editor
+                .as_ref()
+                .map(|editor| (format_time(editor.start), format_time(editor.end)));
+            let button_w = 140.0_f32.min((row.width() * 0.28).max(1.0));
+            let left = Rect::from_min_max(
+                row.min,
+                Pos2::new(row.left() + button_w, row.bottom()),
+            );
+            let right = Rect::from_min_max(
+                Pos2::new(row.right() - button_w, row.top()),
+                row.max,
+            );
+            let center = Rect::from_min_max(
+                Pos2::new(left.right(), row.top()),
+                Pos2::new(right.left(), row.bottom()),
+            );
+            ui.scope_builder(UiBuilder::new().max_rect(left), |ui| {
+                ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                    mark_in = ui.button("I  Mark in").clicked();
+                });
             });
+            ui.scope_builder(UiBuilder::new().max_rect(right), |ui| {
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    mark_out = ui.button("O  Mark out").clicked();
+                });
+            });
+            if let Some((start, end)) = times {
+                ui.scope_builder(UiBuilder::new().max_rect(center), |ui| {
+                    ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                        ui.spacing_mut().item_spacing.x = 8.0;
+                        let cluster = 100.0 + 8.0 + 24.0 + 8.0 + 100.0;
+                        let pad = ((center.width() - cluster) * 0.5).max(0.0);
+                        if pad.is_finite() {
+                            ui.add_space(pad);
+                        }
+                        self.trim_time_value(ui, TimeField::In, &start, clip.duration);
+                        let (arrow, _) = ui.allocate_exact_size(Vec2::new(24.0, 28.0), Sense::hover());
+                        ui.painter().text(
+                            arrow.center(),
+                            egui::Align2::CENTER_CENTER,
+                            "->",
+                            egui::FontId::monospace(13.0),
+                            theme::MUTED,
+                        );
+                        self.trim_time_value(ui, TimeField::Out, &end, clip.duration);
+                    });
+                });
+            }
+            if mark_in {
+                if let Some(editor) = &mut self.editor {
+                    editor.start = time.min(editor.end - 0.05).max(0.0);
+                }
+            }
+            if mark_out {
+                if let Some(editor) = &mut self.editor {
+                    editor.end = time.max(editor.start + 0.05).min(clip.duration);
+                }
+            }
             self.timeline(ui, clip.duration, time);
-            self.editor_transport(ui, clip.duration, frame_step, false);
+            self.editor_transport(ui, clip.duration, false);
             let leftover = ui.available_size();
             ui.allocate_ui_with_layout(leftover, Layout::top_down(Align::Min), |ui| {
                 ui.set_width(width);
@@ -1330,6 +1741,11 @@ impl ClipApp {
                 ui.painter().add(player.paint(rect.shrink(1.0)));
             }
         }
+        if let Some(player) = &mut self.player {
+            if let Some(error) = player.take_error() {
+                self.set_error(error);
+            }
+        }
         if !show_video {
             if let Some(texture) = thumb {
                 let size = texture.size_vec2();
@@ -1364,30 +1780,45 @@ impl ClipApp {
         }
     }
 
-    fn editor_transport(&mut self, ui: &mut Ui, duration: f64, frame_step: f64, watching: bool) {
+    fn editor_transport(&mut self, ui: &mut Ui, duration: f64, watching: bool) {
         let time = self.playback_time();
+        let (display_time, display_duration) = if let Some(editor) = &self.editor {
+            let length = (editor.end - editor.start).max(0.0);
+            (
+                (time - editor.start).clamp(0.0, length),
+                length,
+            )
+        } else {
+            (time, duration)
+        };
         theme::inset().show(ui, |ui| {
             ui.horizontal(|ui| {
                 let playing = self.player.as_ref().is_some_and(|player| player.wants_to_play());
-                if ui
-                    .add_sized(
-                        [72.0, 28.0],
-                        egui::Button::new(
-                            RichText::new(if playing { "Pause" } else { "Play" })
-                                .color(theme::INK)
-                                .family(theme::medium()),
-                        )
-                        .fill(theme::ACCENT),
-                    )
-                    .clicked()
+                if theme::transport_icon_button(
+                    ui,
+                    Vec2::new(36.0, 36.0),
+                    false,
+                    "Return to start",
+                    theme::paint_to_start_icon,
+                )
+                .clicked()
+                {
+                    self.seek_to_clip_start();
+                }
+                if theme::transport_icon_button(
+                    ui,
+                    Vec2::new(44.0, 36.0),
+                    true,
+                    if playing { "Pause" } else { "Play" },
+                    if playing {
+                        theme::paint_pause_icon
+                    } else {
+                        theme::paint_play_icon
+                    },
+                )
+                .clicked()
                 {
                     self.toggle_playback();
-                }
-                if ui.button("−1f").clicked() {
-                    self.step_frame(-frame_step);
-                }
-                if ui.button("+1f").clicked() {
-                    self.step_frame(frame_step);
                 }
                 if watching {
                     let muted = self.player.as_ref().is_some_and(|player| player.muted());
@@ -1403,18 +1834,13 @@ impl ClipApp {
                 }
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     ui.label(
-                        RichText::new(if watching {
-                            "Space play"
-                        } else {
-                            "Space play  ·  I/O marks"
-                        })
-                        .color(theme::MUTED)
-                        .size(11.5),
-                    );
-                    ui.label(
-                        RichText::new(format!("{}  /  {}", format_time(time), format_time(duration)))
-                            .monospace()
-                            .size(14.0),
+                        RichText::new(format!(
+                            "{}  /  {}",
+                            format_time(display_time),
+                            format_time(display_duration)
+                        ))
+                        .monospace()
+                        .size(14.0),
                     );
                 });
             });
@@ -1510,10 +1936,10 @@ impl ClipApp {
                                 },
                             ) {
                                 Ok(_) => {
-                                    self.notice = None;
+                                    self.dismiss_notice();
                                     self.reload_library();
                                 }
-                                Err(error) => self.error = Some(format!("{error:#}")),
+                                Err(error) => self.set_error(format!("{error:#}")),
                             }
                         }
                     }
@@ -1570,7 +1996,7 @@ impl ClipApp {
                                 ui.horizontal(|ui| {
                                     if ui.button("Copy link").clicked() {
                                         copy_text(url);
-                                        self.notice = Some("Published link copied.".into());
+                                        self.set_notice("Published link copied.");
                                     }
                                     if ui.button("Open").clicked() {
                                         let _ = open::that(url);
@@ -1599,47 +2025,177 @@ impl ClipApp {
     }
 
     fn timeline(&mut self, ui: &mut Ui, duration: f64, time: f64) {
-        let height = 28.0;
+        let height = 54.0;
         let (rect, response) = ui.allocate_exact_size(
             Vec2::new(ui.available_width(), height),
             Sense::click_and_drag(),
         );
+        let track = Rect::from_min_max(
+            Pos2::new(rect.left() + 1.0, rect.top() + 16.0),
+            Pos2::new(rect.right() - 1.0, rect.bottom() - 16.0),
+        );
+        let duration = duration.max(0.001);
+        let x_for = |value: f64| rect.left() + (value / duration) as f32 * rect.width();
+        let time_at = |x: f32| {
+            (((x - rect.left()) / rect.width()).clamp(0.0, 1.0) as f64) * duration
+        };
+        let handle_hit = 14.0;
+        let near_handle = |pos: Pos2, start: f64, end: f64| -> Option<TimelineDrag> {
+            if pos.y < track.center().y {
+                return None;
+            }
+            let dist_in = (pos.x - x_for(start)).abs();
+            let dist_out = (pos.x - x_for(end)).abs();
+            if dist_in <= handle_hit && dist_in <= dist_out {
+                Some(TimelineDrag::In)
+            } else if dist_out <= handle_hit {
+                Some(TimelineDrag::Out)
+            } else {
+                None
+            }
+        };
+
         ui.painter()
-            .rect_filled(rect, CornerRadius::same(5), Color32::from_rgb(14, 16, 20));
+            .rect_filled(rect, CornerRadius::same(6), Color32::from_rgb(12, 13, 16));
+        ui.painter().rect_filled(
+            track,
+            CornerRadius::ZERO,
+            Color32::from_rgb(46, 51, 62),
+        );
+
+        let selection = self.editor.as_ref().map(|editor| (editor.start, editor.end));
+        if let Some((start, end)) = selection {
+            let start_x = x_for(start).clamp(track.left(), track.right());
+            let end_x = x_for(end).clamp(track.left(), track.right());
+            if start_x > track.left() + 0.5 {
+                ui.painter().rect_filled(
+                    Rect::from_min_max(track.min, Pos2::new(start_x, track.bottom())),
+                    CornerRadius::ZERO,
+                    Color32::BLACK,
+                );
+            }
+            if end_x < track.right() - 0.5 {
+                ui.painter().rect_filled(
+                    Rect::from_min_max(Pos2::new(end_x, track.top()), track.max),
+                    CornerRadius::ZERO,
+                    Color32::BLACK,
+                );
+            }
+            ui.painter().rect_filled(
+                Rect::from_min_max(
+                    Pos2::new(start_x, track.top()),
+                    Pos2::new(end_x, track.bottom()),
+                ),
+                CornerRadius::ZERO,
+                Color32::from_rgb(92, 70, 28),
+            );
+        }
         ui.painter().rect_stroke(
-            rect,
-            CornerRadius::same(5),
+            track,
+            CornerRadius::ZERO,
             egui::Stroke::new(1.0, theme::LINE),
             StrokeKind::Inside,
         );
-        if let Some(editor) = &self.editor {
-            let start_x =
-                rect.left() + (editor.start / duration.max(0.001)) as f32 * rect.width();
-            let end_x = rect.left() + (editor.end / duration.max(0.001)) as f32 * rect.width();
-            ui.painter().rect_filled(
-                Rect::from_min_max(
-                    Pos2::new(start_x, rect.top() + 4.0),
-                    Pos2::new(end_x, rect.bottom() - 4.0),
-                ),
-                CornerRadius::same(3),
-                theme::ACCENT_DIM,
+        ui.painter().rect_stroke(
+            rect,
+            CornerRadius::same(6),
+            egui::Stroke::new(1.0, theme::LINE),
+            StrokeKind::Inside,
+        );
+
+        let play_x = x_for(time.clamp(0.0, duration));
+        theme::paint_playhead(ui.painter(), play_x, track);
+
+        let dragging = self.timeline_drag;
+        if let Some((start, end)) = selection {
+            theme::paint_trim_handle(
+                ui.painter(),
+                x_for(start),
+                track,
+                true,
+                dragging == Some(TimelineDrag::In),
+            );
+            theme::paint_trim_handle(
+                ui.painter(),
+                x_for(end),
+                track,
+                false,
+                dragging == Some(TimelineDrag::Out),
             );
         }
-        let play_x = rect.left() + (time / duration.max(0.001)) as f32 * rect.width();
-        ui.painter().rect_filled(
-            Rect::from_center_size(
-                Pos2::new(play_x, rect.center().y),
-                Vec2::new(3.0, rect.height() - 6.0),
-            ),
-            CornerRadius::same(2),
-            theme::ACCENT,
-        );
-        if response.clicked() || response.dragged() {
+
+        let pointer = response.interact_pointer_pos().or_else(|| {
+            response.hover_pos().filter(|_| response.hovered())
+        });
+        if let (Some(pos), Some((start, end))) = (pointer, selection) {
+            if near_handle(pos, start, end).is_some()
+                || dragging == Some(TimelineDrag::In)
+                || dragging == Some(TimelineDrag::Out)
+            {
+                ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal);
+            }
+        }
+
+        if response.drag_started() {
+            self.time_edit = None;
+            let kind = pointer.and_then(|pos| {
+                selection.and_then(|(start, end)| near_handle(pos, start, end))
+            });
+            self.timeline_drag = kind.or(Some(TimelineDrag::Playhead));
+        }
+
+        if response.dragged() {
             if let Some(pos) = response.interact_pointer_pos() {
-                let ratio = ((pos.x - rect.left()) / rect.width()).clamp(0.0, 1.0) as f64;
+                self.apply_timeline_drag(time_at(pos.x), duration);
+            }
+        } else if response.clicked() {
+            if let Some(pos) = response.interact_pointer_pos() {
+                let t = time_at(pos.x);
+                let handle = selection.and_then(|(start, end)| match near_handle(pos, start, end) {
+                    Some(TimelineDrag::In) => Some(start),
+                    Some(TimelineDrag::Out) => Some(end),
+                    _ => None,
+                });
+                if let Some(handle) = handle {
+                    self.seek_preview(handle);
+                } else {
+                    self.activate_player(true);
+                    if let Some(player) = &mut self.player {
+                        player.seek_and_play(t);
+                    }
+                }
+            }
+        }
+
+        if response.drag_stopped() {
+            self.timeline_drag = None;
+        }
+    }
+
+    fn apply_timeline_drag(&mut self, time: f64, duration: f64) {
+        match self.timeline_drag.unwrap_or(TimelineDrag::Playhead) {
+            TimelineDrag::In => {
+                let start = self.editor.as_mut().map(|editor| {
+                    editor.start = time.min(editor.end - 0.05).max(0.0);
+                    editor.start
+                });
+                if let Some(start) = start {
+                    self.seek_preview(start);
+                }
+            }
+            TimelineDrag::Out => {
+                let end = self.editor.as_mut().map(|editor| {
+                    editor.end = time.max(editor.start + 0.05).min(duration);
+                    editor.end
+                });
+                if let Some(end) = end {
+                    self.seek_preview(end);
+                }
+            }
+            TimelineDrag::Playhead => {
                 self.activate_player(true);
                 if let Some(player) = &mut self.player {
-                    player.seek_and_play(ratio * duration);
+                    player.seek_and_play(time);
                 }
             }
         }
@@ -1742,7 +2298,7 @@ impl ClipApp {
                 ui.add(egui::TextEdit::singleline(&mut self.auth_confirm).password(true));
                 if ui.button("Reset password and sign in").clicked() {
                     if self.auth_password != self.auth_confirm {
-                        self.error = Some("Passwords do not match.".into());
+                        self.set_error("Passwords do not match.");
                     } else {
                         let engine = self.engine.clone();
                         let token = self.reset_token.clone();
@@ -1768,7 +2324,7 @@ impl ClipApp {
 
     fn submit_auth(&mut self) {
         if self.show_auth == Some(AuthMode::Request) && self.auth_password != self.auth_confirm {
-            self.error = Some("Passwords do not match.".into());
+            self.set_error("Passwords do not match.");
             return;
         }
         let engine = self.engine.clone();
@@ -1986,13 +2542,28 @@ impl ClipApp {
                 ui.text_edit_multiline(&mut reset.url.clone());
                 if ui.button("Copy link").clicked() {
                     copy_text(&reset.url);
-                    self.notice = Some("Private link copied.".into());
+                    self.set_notice("Private link copied.");
                 }
             });
         if !open {
             self.created_reset = None;
         }
     }
+}
+
+fn clip_belongs_in_inbox(path: &Path, inbox: &Path, default_inbox: Option<&Path>) -> bool {
+    if !path.is_file() {
+        return false;
+    }
+    if path_is_within(path, inbox) {
+        return true;
+    }
+    if let Some(default_inbox) = default_inbox {
+        if path_is_within(path, default_inbox) {
+            return false;
+        }
+    }
+    true
 }
 
 fn copy_text(value: &str) {
@@ -2007,6 +2578,27 @@ fn format_time(seconds: f64) -> String {
     }
     let minutes = (seconds / 60.0).floor() as i64;
     format!("{minutes}:{:06.3}", seconds % 60.0)
+}
+
+fn parse_time(text: &str) -> Option<f64> {
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    let parts = text.split(':').collect::<Vec<_>>();
+    let seconds = match parts.as_slice() {
+        [seconds] => seconds.parse::<f64>().ok()?,
+        [minutes, seconds] => {
+            minutes.parse::<f64>().ok()? * 60.0 + seconds.parse::<f64>().ok()?
+        }
+        [hours, minutes, seconds] => {
+            hours.parse::<f64>().ok()? * 3600.0
+                + minutes.parse::<f64>().ok()? * 60.0
+                + seconds.parse::<f64>().ok()?
+        }
+        _ => return None,
+    };
+    seconds.is_finite().then_some(seconds.max(0.0))
 }
 
 fn expiry_label(expires_at: Option<&str>) -> String {

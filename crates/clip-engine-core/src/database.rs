@@ -147,6 +147,14 @@ impl Database {
             .optional()?)
     }
 
+    pub fn put_setting(&self, key: &str, value: &str) -> anyhow::Result<()> {
+        self.connect()?.execute(
+            "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)",
+            params![key, value],
+        )?;
+        Ok(())
+    }
+
     pub fn clips(&self) -> anyhow::Result<Vec<Clip>> {
         let connection = self.connect()?;
         let mut statement = connection.prepare(
@@ -350,6 +358,11 @@ mod tests {
                 .title
                 .as_deref(),
             Some("Game")
+        );
+        database.put_setting("source_directory", "/videos/inbox").unwrap();
+        assert_eq!(
+            database.setting("source_directory").unwrap().as_deref(),
+            Some("/videos/inbox")
         );
         std::fs::remove_dir_all(directory).unwrap();
     }

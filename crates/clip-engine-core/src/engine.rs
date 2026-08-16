@@ -22,11 +22,16 @@ pub struct Engine {
 
 impl Engine {
     pub fn initialize(handle: tokio::runtime::Handle) -> anyhow::Result<Self> {
-        let paths = AppPaths::discover()?;
+        let mut paths = AppPaths::discover()?;
         let legacy = std::env::current_dir()
             .ok()
             .map(|directory| directory.join("data").join("clip-engine.json"));
         let database = Database::initialize(paths.database.clone(), legacy.as_deref())?;
+        if let Some(saved) = database.setting("source_directory")? {
+            paths.source = PathBuf::from(saved);
+        } else {
+            database.put_setting("source_directory", &paths.source.to_string_lossy())?;
+        }
         let api_base = database.setting("api_base_url")?.unwrap_or_else(|| {
             option_env!("CLIP_ENGINE_API_URL")
                 .unwrap_or("https://api.clips.dab.dev")
@@ -63,7 +68,7 @@ impl Engine {
             .map(|value| value.clone())
             .unwrap_or_else(|_| "libx264".into());
         Ok(AppConfig {
-            source_directory: self.paths.source.to_string_lossy().to_string(),
+            source_directory: self.source_directory().to_string_lossy().to_string(),
             audio_track_labels: self
                 .database
                 .setting("audio_track_labels")?
@@ -184,8 +189,27 @@ impl Engine {
         Ok(imported)
     }
 
+    pub fn source_directory(&self) -> PathBuf {
+        self.paths.source.clone()
+    }
+
+    pub fn set_source_directory(&mut self, path: PathBuf) -> anyhow::Result<PathBuf> {
+        let path = path.canonicalize().unwrap_or(path);
+        if !path.is_dir() {
+            anyhow::bail!("Choose an existing folder to use as the inbox.");
+        }
+        self.database
+            .put_setting("source_directory", &path.to_string_lossy())?;
+        self.paths.source = path.clone();
+        Ok(path)
+    }
+
     pub async fn scan_clips(&self) -> anyhow::Result<Vec<Clip>> {
-        let mut directory = tokio::fs::read_dir(&self.paths.source).await?;
+        let source = self.source_directory();
+        if !source.is_dir() {
+            anyhow::bail!("Inbox folder does not exist: {}", source.display());
+        }
+        let mut directory = tokio::fs::read_dir(&source).await?;
         while let Some(entry) = directory.next_entry().await? {
             let path = entry.path();
             if path.is_file() && supported(&path) {

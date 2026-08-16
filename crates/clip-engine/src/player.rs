@@ -59,7 +59,15 @@ struct MpvEvent {
     data: *mut c_void,
 }
 
+#[repr(C)]
+struct MpvEventEndFile {
+    reason: c_int,
+    error: c_int,
+}
+
 const MPV_EVENT_NONE: i32 = 0;
+const MPV_EVENT_END_FILE: i32 = 7;
+const MPV_END_FILE_REASON_ERROR: i32 = 4;
 
 #[link(name = "mpv")]
 unsafe extern "C" {
@@ -132,7 +140,10 @@ pub struct Player {
     update_ctx: *mut egui::Context,
     loaded_path: Option<String>,
     pending_seek: Option<f64>,
+    last_issued_seek: Option<f64>,
     last_seek: Instant,
+    load_started: Option<Instant>,
+    error: Option<String>,
     audio_signature: Option<Vec<i64>>,
 }
 
@@ -150,7 +161,7 @@ impl Player {
                 anyhow::bail!("Could not create the libmpv player");
             }
             set_option(handle, "vo", "libmpv")?;
-            set_option(handle, "hwdec", "auto")?;
+            set_option(handle, "hwdec", "auto-safe")?;
             set_option(handle, "gpu-hwdec-interop", "auto")?;
             set_option(handle, "pause", "yes")?;
             set_option(handle, "hr-seek", "yes")?;
@@ -250,7 +261,10 @@ impl Player {
                 update_ctx,
                 loaded_path: None,
                 pending_seek: None,
+                last_issued_seek: None,
                 last_seek: Instant::now() - Duration::from_secs(1),
+                load_started: None,
+                error: None,
                 audio_signature: None,
             })
         }
@@ -267,6 +281,15 @@ impl Player {
         if self.loaded_path.as_deref() == Some(path) {
             return Ok(());
         }
+        if !is_remote_media(path) {
+            let source = std::path::Path::new(path);
+            if !source.is_file() {
+                anyhow::bail!("This recording is no longer on disk:\n{path}");
+            }
+            if source.metadata().map(|meta| meta.len()).unwrap_or(0) == 0 {
+                anyhow::bail!("This recording is empty and cannot be played:\n{path}");
+            }
+        }
         let _ = set_property(self.handle, "pause", "yes");
         let _ = set_property(self.handle, "lavfi-complex", "");
         let _ = set_property(self.handle, "aid", "auto");
@@ -276,6 +299,9 @@ impl Player {
         self.loaded_path = Some(path.to_string());
         self.audio_signature = None;
         self.pending_seek = None;
+        self.last_issued_seek = None;
+        self.error = None;
+        self.load_started = Some(Instant::now());
         self.shared.pending_play.store(false, Ordering::Relaxed);
         self.shared.awaiting_frame.store(true, Ordering::SeqCst);
         self.request_redraw();
@@ -311,6 +337,12 @@ impl Player {
         self.loaded_path = None;
         self.audio_signature = None;
         self.pending_seek = None;
+        self.last_issued_seek = None;
+        self.load_started = None;
+    }
+
+    pub fn take_error(&mut self) -> Option<String> {
+        self.error.take()
     }
 
     pub fn has_video(&self) -> bool {
@@ -371,8 +403,37 @@ impl Player {
     }
 
     pub fn seek(&mut self, time: f64) {
-        self.pending_seek = Some(time.max(0.0));
+        let time = time.max(0.0);
+        self.pending_seek = Some(time);
+        self.last_issued_seek = Some(time);
         self.request_redraw();
+    }
+
+    pub fn stop_at(&mut self, end: f64) {
+        if self.pending_seek.is_some() {
+            return;
+        }
+        if !self.wants_to_play() {
+            return;
+        }
+        let time = self.time();
+        if let Some(target) = self.last_issued_seek {
+            if target < end - 0.001 && (time - target).abs() > 0.12 && time > target + 0.12 {
+                return;
+            }
+            if (time - target).abs() <= 0.12 || time >= target {
+                self.last_issued_seek = None;
+            } else {
+                return;
+            }
+        }
+        if time + 0.001 < end {
+            return;
+        }
+        self.pause();
+        if time > end + 0.02 {
+            self.seek(end);
+        }
     }
 
     pub fn seek_and_play(&mut self, time: f64) {
@@ -386,15 +447,51 @@ impl Player {
     }
 
     pub fn pump_events(&mut self) {
+        self.check_load_timeout();
         unsafe {
             loop {
                 let event = mpv_wait_event(self.handle, 0.0);
                 if event.is_null() || (*event).event_id == MPV_EVENT_NONE {
                     break;
                 }
+                match (*event).event_id {
+                    MPV_EVENT_END_FILE => {
+                        let data = (*event).data as *const MpvEventEndFile;
+                        if !data.is_null() && (*data).reason == MPV_END_FILE_REASON_ERROR {
+                            let message = if (*data).error < 0 {
+                                CStr::from_ptr(mpv_error_string((*data).error))
+                                    .to_string_lossy()
+                                    .into_owned()
+                            } else {
+                                "The recording could not be played.".into()
+                            };
+                            self.error = Some(message);
+                            self.shared.awaiting_frame.store(false, Ordering::SeqCst);
+                            self.shared.pending_play.store(false, Ordering::Relaxed);
+                            self.load_started = None;
+                        }
+                    }
+                    _ => {}
+                }
                 self.request_redraw();
             }
         }
+    }
+
+    fn check_load_timeout(&mut self) {
+        if !self.shared.awaiting_frame.load(Ordering::Relaxed) {
+            return;
+        }
+        let Some(started) = self.load_started else {
+            return;
+        };
+        if started.elapsed() < Duration::from_secs(8) {
+            return;
+        }
+        self.error = Some(
+            "Playback stalled. The recording may be incomplete, missing, or unreadable.".into(),
+        );
+        self.unload();
     }
 
     pub fn flush_seek(&mut self) {
@@ -689,6 +786,10 @@ fn paint_video(
             mpv_render_context_report_swap(render);
         }
     }
+}
+
+fn is_remote_media(path: &str) -> bool {
+    path.starts_with("http://") || path.starts_with("https://")
 }
 
 fn set_option(handle: *mut MpvHandle, name: &str, value: &str) -> anyhow::Result<()> {

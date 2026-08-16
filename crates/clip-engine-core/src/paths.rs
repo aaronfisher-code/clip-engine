@@ -14,7 +14,7 @@ pub struct AppPaths {
 impl AppPaths {
     pub fn discover() -> anyhow::Result<Self> {
         let data = data_dir()?;
-        let source = video_dir()?.join("Clip Engine").join("Inbox");
+        let source = default_inbox_dir()?;
         let resource = resource_dir();
         Self::new(data, source, &resource)
     }
@@ -85,6 +85,20 @@ pub fn data_dir() -> anyhow::Result<PathBuf> {
     }
 }
 
+pub fn default_inbox_dir() -> anyhow::Result<PathBuf> {
+    Ok(video_dir()?.join("Clip Engine").join("Inbox"))
+}
+
+pub fn path_is_within(path: &Path, directory: &Path) -> bool {
+    let Ok(path) = path.canonicalize() else {
+        return false;
+    };
+    let Ok(directory) = directory.canonicalize() else {
+        return false;
+    };
+    path.starts_with(directory)
+}
+
 pub fn video_dir() -> anyhow::Result<PathBuf> {
     if let Some(value) = std::env::var_os("CLIP_ENGINE_SOURCE_DIR") {
         return Ok(PathBuf::from(value));
@@ -123,4 +137,23 @@ pub fn resource_dir() -> PathBuf {
         }
     }
     PathBuf::from("resources")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn path_is_within_detects_files_in_a_directory() {
+        let directory = std::env::temp_dir().join(format!(
+            "clip-engine-inbox-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let file = directory.join("clip.mkv");
+        std::fs::write(&file, b"test").unwrap();
+        assert!(path_is_within(&file, &directory));
+        assert!(!path_is_within(&file, &directory.join("missing")));
+        std::fs::remove_dir_all(directory).unwrap();
+    }
 }
