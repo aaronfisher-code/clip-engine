@@ -1084,17 +1084,21 @@ impl ClipApp {
         }
     }
 
-    fn seek_to_clip_start(&mut self) {
-        let start = self.editor.as_ref().map(|editor| editor.start).unwrap_or(0.0);
+    fn seek_preserving_play_state(&mut self, time: f64) {
         let playing = self.player.as_ref().is_some_and(|player| player.wants_to_play());
         self.activate_player(playing);
         if let Some(player) = &mut self.player {
             if playing {
-                player.seek_and_play(start);
+                player.seek_and_play(time);
             } else {
-                player.seek(start);
+                player.seek(time);
             }
         }
+    }
+
+    fn seek_to_clip_start(&mut self) {
+        let start = self.editor.as_ref().map(|editor| editor.start).unwrap_or(0.0);
+        self.seek_preserving_play_state(start);
     }
 
     fn trim_time_value(&mut self, ui: &mut Ui, field: TimeField, displayed: &str, duration: f64) {
@@ -1478,19 +1482,19 @@ impl ClipApp {
         let show_video = self.player.as_ref().is_some_and(|player| player.has_video());
         let buffering = self.player.as_ref().is_some_and(|player| player.buffering());
         if let Some(player) = &mut self.player {
-            if mix_editor_audio && player.has_video() {
-                let _ = player.apply_audio(
-                    &self
-                        .editor
-                        .as_ref()
-                        .map(|editor| editor.tracks.clone())
-                        .unwrap_or_default(),
-                );
-                player.set_mute(self.editor.as_ref().is_some_and(|editor| editor.muted));
-            }
             if loaded {
                 player.pump_events();
                 player.flush_seek();
+                if mix_editor_audio {
+                    let _ = player.apply_audio(
+                        &self
+                            .editor
+                            .as_ref()
+                            .map(|editor| editor.tracks.clone())
+                            .unwrap_or_default(),
+                    );
+                    player.set_mute(self.editor.as_ref().is_some_and(|editor| editor.muted));
+                }
                 player.start_if_ready();
                 ui.painter().add(player.paint(rect.shrink(1.0)));
             }
@@ -2008,10 +2012,7 @@ impl ClipApp {
                 if let Some(handle) = handle {
                     self.seek_preview(handle);
                 } else {
-                    self.activate_player(true);
-                    if let Some(player) = &mut self.player {
-                        player.seek_and_play(t);
-                    }
+                    self.seek_preserving_play_state(t);
                 }
             }
         }
@@ -2042,10 +2043,7 @@ impl ClipApp {
                 }
             }
             TimelineDrag::Playhead => {
-                self.activate_player(true);
-                if let Some(player) = &mut self.player {
-                    player.seek_and_play(time);
-                }
+                self.seek_preserving_play_state(time);
             }
         }
     }

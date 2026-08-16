@@ -67,6 +67,7 @@ struct MpvEventEndFile {
 
 const MPV_EVENT_NONE: i32 = 0;
 const MPV_EVENT_END_FILE: i32 = 7;
+const MPV_EVENT_PLAYBACK_RESTART: i32 = 21;
 const MPV_END_FILE_REASON_ERROR: i32 = 4;
 
 #[link(name = "mpv")]
@@ -84,6 +85,12 @@ unsafe extern "C" {
         ctx: *mut MpvHandle,
         name: *const c_char,
         data: *const c_char,
+    ) -> c_int;
+    fn mpv_set_property(
+        ctx: *mut MpvHandle,
+        name: *const c_char,
+        format: i32,
+        data: *mut c_void,
     ) -> c_int;
     fn mpv_get_property(
         ctx: *mut MpvHandle,
@@ -128,6 +135,8 @@ struct RenderShared {
     render: AtomicPtr<MpvRenderContext>,
     target: Mutex<Option<GlTarget>>,
     awaiting_frame: AtomicBool,
+    awaiting_seek_frame: AtomicBool,
+    seek_restarted: AtomicBool,
     resume_after_seek: AtomicBool,
     pending_play: AtomicBool,
 }
@@ -142,6 +151,7 @@ pub struct Player {
     pending_seek: Option<f64>,
     last_issued_seek: Option<f64>,
     last_seek: Instant,
+    seek_in_flight: bool,
     load_started: Option<Instant>,
     error: Option<String>,
     audio_signature: Option<Vec<i64>>,
@@ -161,10 +171,12 @@ impl Player {
                 anyhow::bail!("Could not create the libmpv player");
             }
             set_option(handle, "vo", "libmpv")?;
-            set_option(handle, "hwdec", "auto-safe")?;
+            set_option(handle, "hwdec", "auto-copy-safe")
+                .or_else(|_| set_option(handle, "hwdec", "auto-copy"))
+                .or_else(|_| set_option(handle, "hwdec", "auto-safe"))?;
             set_option(handle, "gpu-hwdec-interop", "auto")?;
             set_option(handle, "pause", "yes")?;
-            set_option(handle, "hr-seek", "yes")?;
+            set_option(handle, "hr-seek", "always")?;
             set_option(handle, "keep-open", "yes")?;
             set_option(handle, "idle", "yes")?;
             set_option(handle, "osc", "no")?;
@@ -173,9 +185,9 @@ impl Player {
             set_option(handle, "input-vo-keyboard", "no")?;
             set_option(handle, "audio-display", "no")?;
             set_option(handle, "interpolation", "no")?;
-            set_option(handle, "video-sync", "audio")?;
+            set_option(handle, "video-sync", "display-desync")?;
             set_option(handle, "video-timing-offset", "0")?;
-            set_option(handle, "vd-lavc-dr", "yes")?;
+            set_option(handle, "vd-lavc-dr", "no")?;
             set_option(handle, "framedrop", "no")?;
             set_option(handle, "hr-seek-framedrop", "no")?;
             set_option(handle, "rebase-start-time", "yes")?;
@@ -245,6 +257,8 @@ impl Player {
                 render: AtomicPtr::new(render),
                 target: Mutex::new(None),
                 awaiting_frame: AtomicBool::new(false),
+                awaiting_seek_frame: AtomicBool::new(false),
+                seek_restarted: AtomicBool::new(false),
                 resume_after_seek: AtomicBool::new(false),
                 pending_play: AtomicBool::new(false),
             });
@@ -263,6 +277,7 @@ impl Player {
                 pending_seek: None,
                 last_issued_seek: None,
                 last_seek: Instant::now() - Duration::from_secs(1),
+                seek_in_flight: false,
                 load_started: None,
                 error: None,
                 audio_signature: None,
@@ -300,16 +315,22 @@ impl Player {
         self.audio_signature = None;
         self.pending_seek = None;
         self.last_issued_seek = None;
+        self.seek_in_flight = false;
         self.error = None;
         self.load_started = Some(Instant::now());
         self.shared.pending_play.store(false, Ordering::Relaxed);
         self.shared.awaiting_frame.store(true, Ordering::SeqCst);
+        self.shared.awaiting_seek_frame.store(false, Ordering::Relaxed);
+        self.shared.seek_restarted.store(false, Ordering::Relaxed);
         self.request_redraw();
         Ok(())
     }
 
     pub fn wants_redraw(&self) -> bool {
-        self.shared.awaiting_frame.load(Ordering::Relaxed)
+        self.pending_seek.is_some()
+            || self.seek_in_flight
+            || self.shared.awaiting_frame.load(Ordering::Relaxed)
+            || self.shared.awaiting_seek_frame.load(Ordering::Relaxed)
     }
 
     fn request_redraw(&self) {
@@ -332,12 +353,15 @@ impl Player {
         self.shared.resume_after_seek.store(false, Ordering::Relaxed);
         self.shared.pending_play.store(false, Ordering::Relaxed);
         self.shared.awaiting_frame.store(false, Ordering::SeqCst);
+        self.shared.awaiting_seek_frame.store(false, Ordering::Relaxed);
+        self.shared.seek_restarted.store(false, Ordering::Relaxed);
         let _ = set_property(self.handle, "pause", "yes");
         let _ = command(self.handle, &["stop"]);
         self.loaded_path = None;
         self.audio_signature = None;
         self.pending_seek = None;
         self.last_issued_seek = None;
+        self.seek_in_flight = false;
         self.load_started = None;
     }
 
@@ -352,8 +376,7 @@ impl Player {
     pub fn buffering(&self) -> bool {
         self.loaded_path.is_some()
             && (self.shared.awaiting_frame.load(Ordering::Relaxed)
-                || flag(self.handle, "paused-for-cache").unwrap_or(false)
-                || flag(self.handle, "seeking").unwrap_or(false))
+                || flag(self.handle, "paused-for-cache").unwrap_or(false))
     }
 
     pub fn play(&self) {
@@ -362,12 +385,14 @@ impl Player {
             return;
         }
         self.shared.pending_play.store(false, Ordering::Relaxed);
+        self.set_playback_sync(true);
         let _ = set_property(self.handle, "pause", "no");
     }
 
     pub fn pause(&self) {
         self.shared.resume_after_seek.store(false, Ordering::Relaxed);
         self.shared.pending_play.store(false, Ordering::Relaxed);
+        self.set_playback_sync(false);
         let _ = set_property(self.handle, "pause", "yes");
     }
 
@@ -383,10 +408,11 @@ impl Player {
         if !self.shared.pending_play.load(Ordering::Relaxed) {
             return;
         }
-        if self.pending_seek.is_some() {
+        if self.pending_seek.is_some() || self.seek_in_flight {
             return;
         }
         self.shared.pending_play.store(false, Ordering::Relaxed);
+        self.set_playback_sync(true);
         let _ = set_property(self.handle, "pause", "no");
     }
 
@@ -398,7 +424,20 @@ impl Player {
         flag(self.handle, "mute").unwrap_or(false)
     }
 
+    fn set_playback_sync(&self, playing: bool) {
+        let mode = if playing { "audio" } else { "display-desync" };
+        let _ = set_property(self.handle, "video-sync", mode);
+    }
+
     pub fn time(&self) -> f64 {
+        if let Some(time) = self.pending_seek {
+            return time;
+        }
+        if self.shared.awaiting_seek_frame.load(Ordering::Relaxed) {
+            if let Some(time) = self.last_issued_seek {
+                return time;
+            }
+        }
         number(self.handle, "time-pos").unwrap_or(0.0)
     }
 
@@ -467,8 +506,17 @@ impl Player {
                             };
                             self.error = Some(message);
                             self.shared.awaiting_frame.store(false, Ordering::SeqCst);
+                            self.shared.awaiting_seek_frame.store(false, Ordering::Relaxed);
+                            self.shared.seek_restarted.store(false, Ordering::Relaxed);
                             self.shared.pending_play.store(false, Ordering::Relaxed);
+                            self.seek_in_flight = false;
                             self.load_started = None;
+                        }
+                    }
+                    MPV_EVENT_PLAYBACK_RESTART => {
+                        if self.seek_in_flight {
+                            self.seek_in_flight = false;
+                            self.shared.seek_restarted.store(true, Ordering::SeqCst);
                         }
                     }
                     _ => {}
@@ -495,16 +543,56 @@ impl Player {
     }
 
     pub fn flush_seek(&mut self) {
+        if self.seek_in_flight && self.last_seek.elapsed() > Duration::from_millis(1000) {
+            self.seek_in_flight = false;
+        }
+        if self.shared.awaiting_seek_frame.load(Ordering::Relaxed)
+            && self.last_seek.elapsed() > Duration::from_millis(1000)
+        {
+            self.shared.awaiting_seek_frame.store(false, Ordering::Relaxed);
+            self.shared.seek_restarted.store(false, Ordering::Relaxed);
+        }
         let Some(time) = self.pending_seek else {
             return;
         };
-        if self.last_seek.elapsed() < Duration::from_millis(40) {
+        if self.shared.awaiting_frame.load(Ordering::Relaxed) {
+            self.request_redraw();
             return;
         }
-        let value = format!("{time:.6}");
-        if command(self.handle, &["seek", &value, "absolute"]).is_ok() {
+        if self.seek_in_flight {
+            self.request_redraw();
+            return;
+        }
+        let playing = self.playing()
+            || self.shared.resume_after_seek.load(Ordering::Relaxed)
+            || self.shared.pending_play.load(Ordering::Relaxed);
+        if playing && self.last_seek.elapsed() < Duration::from_millis(40) {
+            self.request_redraw();
+            return;
+        }
+        let issued = if playing {
+            command(
+                self.handle,
+                &["seek", &format!("{time:.6}"), "absolute+exact"],
+            )
+            .is_ok()
+        } else {
+            self.set_playback_sync(false);
+            set_property_f64(self.handle, "time-pos", time).is_ok()
+                || command(
+                    self.handle,
+                    &["seek", &format!("{time:.6}"), "absolute+exact"],
+                )
+                .is_ok()
+        };
+        if issued {
             self.pending_seek = None;
             self.last_seek = Instant::now();
+            self.seek_in_flight = true;
+            self.shared.seek_restarted.store(false, Ordering::SeqCst);
+            self.shared
+                .awaiting_seek_frame
+                .store(true, Ordering::Relaxed);
             if self.shared.resume_after_seek.load(Ordering::Relaxed)
                 && !self.shared.awaiting_frame.load(Ordering::Relaxed)
             {
@@ -515,14 +603,12 @@ impl Player {
     }
 
     pub fn apply_audio(&mut self, stream_indexes: &[i64]) -> anyhow::Result<()> {
-        if self.audio_signature.as_deref() == Some(stream_indexes) {
-            return Ok(());
-        }
         let available = self.audio_tracks();
         if available.is_empty() {
             return Ok(());
         }
         let mapped = map_requested(&available, stream_indexes);
+        let selection_changed = self.audio_signature.as_deref() != Some(stream_indexes);
         if self.audio_already_matches(&mapped) {
             self.audio_signature = Some(stream_indexes.to_vec());
             return Ok(());
@@ -554,9 +640,8 @@ impl Player {
         let _ = set_property(self.handle, "mute", "no");
         let _ = set_property(self.handle, "volume", "100");
         self.audio_signature = Some(stream_indexes.to_vec());
-        if !self.playing() && self.pending_seek.is_none() {
-            let _ = command(self.handle, &["seek", "0", "absolute+exact"]);
-            self.shared.awaiting_frame.store(true, Ordering::Relaxed);
+        if selection_changed && self.pending_seek.is_none() {
+            self.seek(self.time());
         }
         Ok(())
     }
@@ -567,15 +652,21 @@ impl Player {
             [] => lavfi.is_empty() && string(self.handle, "aid").as_deref() == Some("no"),
             [id] => {
                 lavfi.is_empty()
-                    && (string(self.handle, "aid").as_deref() == Some("auto")
-                        || number(self.handle, "aid").map(|value| value as i64) == Some(*id))
+                    && number(self.handle, "aid").map(|value| value as i64) == Some(*id)
             }
-            ids => ids.iter().all(|id| lavfi.contains(&format!("aid{id}"))),
+            ids => {
+                let expected = ids
+                    .iter()
+                    .map(|id| format!("[aid{id}]"))
+                    .collect::<String>();
+                lavfi.starts_with(&format!("{expected}amix=inputs={}", ids.len()))
+            }
         }
     }
 
     pub fn clear_audio(&mut self) {
         self.audio_signature = None;
+        self.request_redraw();
     }
 
     fn audio_tracks(&self) -> Vec<(i64, i64)> {
@@ -711,6 +802,8 @@ fn paint_video(
         };
         let flags = mpv_render_context_update(render);
         let has_frame = flags & MPV_RENDER_UPDATE_FRAME != 0;
+        let seek_ready = shared.seek_restarted.load(Ordering::SeqCst);
+        let force_render = shared.awaiting_seek_frame.load(Ordering::Relaxed) && seek_ready;
         gl.disable(glow::SCISSOR_TEST);
         gl.viewport(0, 0, width, height);
         gl.bind_framebuffer(glow::FRAMEBUFFER, Some(current.fbo));
@@ -744,13 +837,17 @@ fn paint_video(
                 data: ptr::null_mut(),
             },
         ];
-        if has_frame || recreate {
+        if has_frame || recreate || force_render {
             gl.disable(glow::SCISSOR_TEST);
             gl.viewport(0, 0, width, height);
             gl.bind_framebuffer(glow::FRAMEBUFFER, Some(current.fbo));
             let _ = mpv_render_context_render(render, params.as_mut_ptr());
             if has_frame {
                 shared.awaiting_frame.store(false, Ordering::Relaxed);
+            }
+            if seek_ready && (has_frame || force_render) {
+                shared.awaiting_seek_frame.store(false, Ordering::Relaxed);
+                shared.seek_restarted.store(false, Ordering::Relaxed);
             }
         }
         let window = if window_fbo == 0 {
@@ -782,7 +879,7 @@ fn paint_video(
         );
         gl.bind_framebuffer(glow::FRAMEBUFFER, window);
         gl.disable(glow::SCISSOR_TEST);
-        if has_frame {
+        if has_frame || force_render {
             mpv_render_context_report_swap(render);
         }
     }
@@ -806,6 +903,19 @@ fn set_property(handle: *mut MpvHandle, name: &str, value: &str) -> anyhow::Resu
             handle,
             name.as_ptr(),
             value.as_ptr(),
+        ))
+    }
+}
+
+fn set_property_f64(handle: *mut MpvHandle, name: &str, value: f64) -> anyhow::Result<()> {
+    let name = CString::new(name)?;
+    let mut value = value;
+    unsafe {
+        check(mpv_set_property(
+            handle,
+            name.as_ptr(),
+            MPV_FORMAT_DOUBLE,
+            (&mut value as *mut f64).cast(),
         ))
     }
 }
