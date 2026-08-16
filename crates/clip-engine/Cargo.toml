@@ -36,7 +36,11 @@ before-packaging-command = "cargo build -p clip-engine --release --bin clip-engi
 formats = ["deb", "appimage", "nsis"]
 homepage = "https://github.com/aaronfisher-code/clip-engine"
 icons = ["assets/clip-engine.png"]
-resources = ["../../resources/binaries", "../../resources/THIRD_PARTY_NOTICES.md"]
+resources = [
+  { src = "../../resources/binaries", target = "binaries" },
+  { src = "../../resources/binaries/*.dll", target = "." },
+  { src = "../../resources/THIRD_PARTY_NOTICES.md", target = "THIRD_PARTY_NOTICES.md" },
+]
 
 [package.metadata.packager.nsis]
 installer-mode = "currentUser"
