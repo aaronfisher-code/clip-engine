@@ -201,8 +201,7 @@ impl ClipApp {
             }
         }
         let clips = engine.clips().unwrap_or(clips);
-        let player = match Player::new(&cc.egui_ctx, cc.get_proc_address, cc.display_handle().ok())
-        {
+        let player = match Player::new(&cc.egui_ctx, cc.gl.is_some(), cc.display_handle().ok()) {
             Ok(player) => Some(player),
             Err(error) => {
                 let mut app = Self {
@@ -1787,7 +1786,7 @@ impl ClipApp {
                     player.set_mute(self.editor.as_ref().is_some_and(|editor| editor.muted));
                 }
                 player.start_if_ready();
-                ui.painter().add(player.paint(rect.shrink(1.0)));
+                player.paint(ui, rect.shrink(1.0));
             }
         }
         if let Some(player) = &mut self.player {

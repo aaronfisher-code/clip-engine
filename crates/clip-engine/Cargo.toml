@@ -12,7 +12,7 @@ default-run = "clip-engine"
 anyhow = "1"
 chrono = { version = "0.4", features = ["serde"] }
 clip-engine-core = { path = "../clip-engine-core" }
-eframe = { version = "0.32", default-features = false, features = ["accesskit", "default_fonts", "wayland", "x11", "glow"] }
+eframe = { version = "0.32", default-features = false, features = ["accesskit", "default_fonts", "wayland", "x11", "glow", "wgpu"] }
 egui = "0.32"
 glow = "0.16"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
@@ -50,9 +50,16 @@ icons = [
 resources = [
   { src = "../../resources/binaries", target = "binaries" },
   { src = "../../resources/binaries/*.dll", target = "." },
+  { src = "../../resources/binaries/*.so*", target = "." },
   { src = "../../resources/THIRD_PARTY_NOTICES.md", target = "THIRD_PARTY_NOTICES.md" },
 ]
 
 [package.metadata.packager.nsis]
 installer-mode = "currentUser"
 installer-icon = "assets/clip-engine.ico"
+
+[package.metadata.packager.appimage]
+libs = ["libmpv.so.2"]
+
+[package.metadata.packager.deb]
+depends = ["libmpv2 | libmpv1"]
