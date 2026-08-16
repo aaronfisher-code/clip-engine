@@ -156,10 +156,7 @@ jobs:
           if (-not $asset) { throw 'mpv-dev asset missing' }
           Invoke-WebRequest $asset.browser_download_url -OutFile "$env:RUNNER_TEMP/mpv-dev.7z"
           7z x "$env:RUNNER_TEMP/mpv-dev.7z" -o"$env:RUNNER_TEMP/mpv-dev"
-          $root = Get-ChildItem "$env:RUNNER_TEMP/mpv-dev" -Directory | Select-Object -First 1
-          Copy-Item "$($root.FullName)/libmpv-2.dll" resources/binaries/mpv-2.dll -ErrorAction SilentlyContinue
-          Copy-Item "$($root.FullName)/mpv-2.dll" resources/binaries/mpv-2.dll -ErrorAction SilentlyContinue
-          "MPV_LIB_DIR=$($root.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
+          & scripts/windows-mpv-msvc-lib.ps1 -ExtractDir "$env:RUNNER_TEMP/mpv-dev" -DllDestination "resources/binaries/mpv-2.dll"
       - name: Install cargo-packager
         run: cargo install cargo-packager --locked
       - name: Build release binary

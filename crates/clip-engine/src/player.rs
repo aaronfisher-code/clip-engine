@@ -124,6 +124,19 @@ unsafe extern "C" {
     fn eglGetProcAddress(procname: *const c_char) -> *mut c_void;
 }
 
+#[cfg(windows)]
+#[link(name = "opengl32")]
+unsafe extern "system" {
+    fn wglGetProcAddress(proc: *const c_char) -> *mut c_void;
+}
+
+#[cfg(windows)]
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    fn LoadLibraryA(name: *const u8) -> *mut c_void;
+    fn GetProcAddress(module: *mut c_void, proc: *const c_char) -> *mut c_void;
+}
+
 struct GlTarget {
     fbo: glow::Framebuffer,
     texture: glow::Texture,
@@ -730,6 +743,17 @@ unsafe extern "C" fn gl_get_proc_address(_ctx: *mut c_void, name: *const c_char)
             if !symbol.is_null() {
                 return symbol;
             }
+        }
+    }
+    #[cfg(windows)]
+    {
+        let pointer = wglGetProcAddress(name);
+        if !pointer.is_null() {
+            return pointer;
+        }
+        let module = LoadLibraryA(b"opengl32.dll\0".as_ptr());
+        if !module.is_null() {
+            return GetProcAddress(module, name);
         }
     }
     ptr::null_mut()

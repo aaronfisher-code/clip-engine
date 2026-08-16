@@ -13,6 +13,7 @@ fn main() -> eframe::Result<()> {
     let engine = Engine::initialize(runtime.handle().clone()).expect("initialize Clip Engine");
     let _keep_alive = runtime;
     let icon = load_icon();
+    #[allow(unused_mut)]
     let mut options = eframe::NativeOptions {
         viewport: ViewportBuilder::default()
             .with_inner_size([1440.0, 900.0])
