@@ -7,5 +7,6 @@ pub mod models;
 pub mod paths;
 
 pub use engine::Engine;
+pub use media::{format_file_size, publish_options, PublishOption, MAX_PUBLISH_BYTES};
 pub use models::*;
 pub use paths::AppPaths;

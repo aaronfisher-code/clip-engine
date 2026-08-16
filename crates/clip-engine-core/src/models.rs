@@ -33,12 +33,24 @@ pub struct Clip {
     pub preview_error: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportProfile {
+    pub width: i64,
+    pub height: i64,
+    pub fps: i64,
+    #[serde(default)]
+    pub video_bitrate: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Selection {
     pub start: f64,
     pub end: f64,
     pub audio_stream_indexes: Vec<i64>,
+    #[serde(default)]
+    pub export: Option<ExportProfile>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

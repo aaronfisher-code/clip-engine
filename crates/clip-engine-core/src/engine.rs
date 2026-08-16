@@ -320,6 +320,13 @@ impl Engine {
         {
             anyhow::bail!("An audio selection is invalid.");
         }
+        let mut selection = selection;
+        selection.export = Some(media::resolve_export_profile(
+            clip.width,
+            clip.height,
+            clip.fps,
+            &selection,
+        )?);
         let id = uuid::Uuid::new_v4().to_string();
         let output_name = format!("{}-{}.mp4", media::safe_base_name(&clip.name), &id[..8]);
         let job = PublishJob {
@@ -463,6 +470,7 @@ async fn run_publish(engine: Engine, clip: Clip, mut job: PublishJob) {
             .selection
             .clone()
             .expect("publish jobs always contain a selection");
+        let profile = media::resolve_export_profile(clip.width, clip.height, clip.fps, &selection)?;
         let output = engine.paths.exports.join(&job.output_name);
         let thumbnail = engine.paths.exports.join(format!(".{}.jpg", job.id));
         job.status = "transcoding".into();
@@ -473,7 +481,7 @@ async fn run_publish(engine: Engine, clip: Clip, mut job: PublishJob) {
             Path::new(&clip.source_path),
             &output,
             &selection,
-            clip.fps,
+            &profile,
             &encoder,
             engine.quality,
             |progress| {
@@ -490,6 +498,9 @@ async fn run_publish(engine: Engine, clip: Clip, mut job: PublishJob) {
         )
         .await?;
         let video_size = tokio::fs::metadata(&output).await?.len();
+        if video_size > media::MAX_PUBLISH_BYTES {
+            anyhow::bail!("The transcoded clip is over 200 MB. Choose a lower quality or shorten the trim.");
+        }
         let thumbnail_size = tokio::fs::metadata(&thumbnail).await?.len();
         let created = engine
             .cloud
@@ -502,9 +513,9 @@ async fn run_publish(engine: Engine, clip: Clip, mut job: PublishJob) {
                 video_size,
                 thumbnail_size,
                 duration: selection.end - selection.start,
-                width: 1920,
-                height: 1080,
-                fps: clip.fps.clamp(1.0, 120.0),
+                width: profile.width,
+                height: profile.height,
+                fps: profile.fps as f64,
             })
             .await?;
         job.status = "uploading".into();

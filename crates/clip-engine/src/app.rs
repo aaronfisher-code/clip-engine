@@ -3,7 +3,7 @@ use crate::theme;
 use clip_engine_core::cloud::{AccessRequest, AdminUser, CloudClip, CloudUser, PasswordReset};
 use clip_engine_core::models::{AppConfig, Clip, PublishJob, Selection};
 use clip_engine_core::paths::{default_inbox_dir, path_is_within};
-use clip_engine_core::Engine;
+use clip_engine_core::{format_file_size, publish_options, Engine};
 use eframe::egui::{
     self, Align, Color32, ColorImage, CornerRadius, CursorIcon, Layout, Pos2, Rect, RichText,
     Sense, StrokeKind, TextureHandle, TextureOptions, Ui, UiBuilder, Vec2,
@@ -53,6 +53,8 @@ struct EditorState {
     end: f64,
     tracks: Vec<i64>,
     muted: bool,
+    export_height: i64,
+    export_fps: i64,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -655,7 +657,7 @@ impl eframe::App for ClipApp {
                             ui.add_space(6.0);
                             ui.label(
                                 RichText::new(
-                                    "Import a recording to trim it, pick the audio you want, and publish a clean 1080p120 share link.",
+                                    "Import a recording to trim it, pick the audio you want, and publish a share link.",
                                 )
                                 .color(theme::MUTED),
                             );
@@ -711,10 +713,15 @@ impl ClipApp {
         });
         if let Some(job) = active.cloned() {
             let stage = match job.status.as_str() {
-                "queued" => "Queued",
-                "transcoding" => "Exporting 1080p120",
-                "uploading" => "Uploading",
-                _ => "Working",
+                "queued" => "Queued".into(),
+                "transcoding" => job
+                    .selection
+                    .as_ref()
+                    .and_then(|selection| selection.export.as_ref())
+                    .map(|profile| format!("Exporting {}p{}", profile.height, profile.fps))
+                    .unwrap_or_else(|| "Exporting".into()),
+                "uploading" => "Uploading".into(),
+                _ => "Working".into(),
             };
             theme::card().show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
@@ -1264,7 +1271,7 @@ impl ClipApp {
             .as_ref()
             .map(|selection| (selection.end - selection.start).max(0.05))
             .unwrap_or(clip.duration);
-        let frame_step = 1.0 / 120.0;
+        let frame_step = 1.0 / published_export(&job, clip).2.max(1) as f64;
         let size = ui.available_size();
         let wide = size.x >= 1040.0;
         let gap = 14.0;
@@ -1350,14 +1357,15 @@ impl ClipApp {
         ui.set_min_width(width);
         ui.set_min_height(height);
         let time = self.playback_time();
+        let (export_width, export_height, export_fps) = published_export(job, clip);
         ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
             ui.set_width(width);
             ui.add_space(14.0);
             ui.label(
                 RichText::new(if job.media_url.is_some() {
-                    "Published 1080p120 playback"
+                    format!("Published {export_height}p{export_fps} playback")
                 } else {
-                    "No media URL on this version. Open the share link instead."
+                    "No media URL on this version. Open the share link instead.".into()
                 })
                 .color(theme::MUTED)
                 .size(12.0),
@@ -1376,9 +1384,11 @@ impl ClipApp {
                     );
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         ui.label(
-                            RichText::new("1920×1080  ·  120 fps  ·  published")
-                                .color(theme::MUTED)
-                                .size(12.0),
+                            RichText::new(format!(
+                                "{export_width}×{export_height}  ·  {export_fps} fps  ·  published"
+                            ))
+                            .color(theme::MUTED)
+                            .size(12.0),
                         );
                     });
                 });
@@ -1464,6 +1474,17 @@ impl ClipApp {
             .as_ref()
             .is_none_or(|editor| editor.clip_id != clip.id)
         {
+            let options = publish_options(
+                clip.width,
+                clip.height,
+                clip.fps,
+                clip.duration,
+                !clip.audio_tracks.is_empty(),
+            );
+            let (export_height, export_fps) = options
+                .first()
+                .map(|option| (option.height, option.fps))
+                .unwrap_or((720, 30));
             self.editor = Some(EditorState {
                 clip_id: clip.id.clone(),
                 start: 0.0,
@@ -1474,6 +1495,8 @@ impl ClipApp {
                     .map(|track| track.stream_index)
                     .collect(),
                 muted: false,
+                export_height,
+                export_fps,
             });
             self.time_edit = None;
         }
@@ -1903,17 +1926,111 @@ impl ClipApp {
                     ui.set_width(ui.available_width());
                     ui.label(RichText::new("Publish").family(theme::medium()).size(14.5));
                     ui.label(
-                        RichText::new("Exports a 1080p120 share link that expires in 30 days.")
-                            .color(theme::MUTED)
-                            .size(12.0),
+                        RichText::new(
+                            "Share links expire in 30 days. Qualities over 200 MB are hidden.",
+                        )
+                        .color(theme::MUTED)
+                        .size(12.0),
                     );
                     ui.add_space(8.0);
-                    let can_publish = self.config.authenticated && !self.busy;
+                    let options = self.editor.as_ref().map(|editor| {
+                        publish_options(
+                            clip.width,
+                            clip.height,
+                            clip.fps,
+                            editor.end - editor.start,
+                            !editor.tracks.is_empty(),
+                        )
+                    });
+                    if let (Some(editor), Some(options)) = (&mut self.editor, options.as_ref()) {
+                        if !options.iter().any(|option| {
+                            option.height == editor.export_height && option.fps == editor.export_fps
+                        }) {
+                            if let Some(option) = options.first() {
+                                editor.export_height = option.height;
+                                editor.export_fps = option.fps;
+                            }
+                        }
+                    }
+                    let (export_height, export_fps) = self
+                        .editor
+                        .as_ref()
+                        .map(|editor| (editor.export_height, editor.export_fps))
+                        .unwrap_or((0, 0));
+                    let selected = options.as_ref().and_then(|options| {
+                        options.iter().find(|option| {
+                            option.height == export_height && option.fps == export_fps
+                        })
+                    });
+                    if let Some(options) = &options {
+                        if options.is_empty() {
+                            ui.label(
+                                RichText::new(
+                                    "This selection is too long to stay under 200 MB, even at 720p30. Shorten the trim.",
+                                )
+                                .color(theme::DANGER)
+                                .size(12.0),
+                            );
+                        } else {
+                            let selected_text = selected
+                                .map(|option| {
+                                    format!(
+                                        "{}  ·  ~{}",
+                                        option.quality_label(),
+                                        format_file_size(option.estimated_bytes)
+                                    )
+                                })
+                                .unwrap_or_else(|| "Choose quality".into());
+                            egui::ComboBox::from_id_salt("publish-quality")
+                                .width(ui.available_width())
+                                .selected_text(selected_text)
+                                .show_ui(ui, |ui| {
+                                    for option in options {
+                                        let label = format!(
+                                            "{}  ·  ~{}",
+                                            option.quality_label(),
+                                            format_file_size(option.estimated_bytes)
+                                        );
+                                        let is_selected = self.editor.as_ref().is_some_and(|editor| {
+                                            editor.export_height == option.height
+                                                && editor.export_fps == option.fps
+                                        });
+                                        if ui.selectable_label(is_selected, label).clicked() {
+                                            let height = option.height;
+                                            let fps = option.fps;
+                                            if let Some(editor) = &mut self.editor {
+                                                editor.export_height = height;
+                                                editor.export_fps = fps;
+                                            }
+                                        }
+                                    }
+                                });
+                            if let Some(option) = selected {
+                                ui.add_space(4.0);
+                                ui.label(
+                                    RichText::new(format!(
+                                        "{}×{} after transcoding, about {}",
+                                        option.width,
+                                        option.height,
+                                        format_file_size(option.estimated_bytes)
+                                    ))
+                                    .color(theme::MUTED)
+                                    .size(12.0),
+                                );
+                            }
+                        }
+                    }
+                    ui.add_space(8.0);
+                    let can_publish =
+                        self.config.authenticated && !self.busy && selected.is_some();
+                    let button_label = selected
+                        .map(|option| format!("Publish {}", option.quality_label()))
+                        .unwrap_or_else(|| "Publish".into());
                     if ui
                         .add_enabled(
                             can_publish,
                             egui::Button::new(
-                                RichText::new("Publish 1080p120")
+                                RichText::new(button_label)
                                     .color(theme::INK)
                                     .family(theme::medium()),
                             )
@@ -1926,13 +2043,14 @@ impl ClipApp {
                         )
                         .clicked()
                     {
-                        if let Some(editor) = &self.editor {
+                        if let (Some(editor), Some(option)) = (&self.editor, selected) {
                             match self.engine.publish_clip(
                                 clip.id.clone(),
                                 Selection {
                                     start: editor.start,
                                     end: editor.end,
                                     audio_stream_indexes: editor.tracks.clone(),
+                                    export: Some(option.profile()),
                                 },
                             ) {
                                 Ok(_) => {
@@ -2569,6 +2687,14 @@ fn clip_belongs_in_inbox(path: &Path, inbox: &Path, default_inbox: Option<&Path>
 fn copy_text(value: &str) {
     if let Ok(mut clipboard) = arboard::Clipboard::new() {
         let _ = clipboard.set_text(value);
+    }
+}
+
+fn published_export(job: &PublishJob, clip: &Clip) -> (i64, i64, i64) {
+    if let Some(export) = job.selection.as_ref().and_then(|selection| selection.export.as_ref()) {
+        (export.width, export.height, export.fps)
+    } else {
+        (clip.width, clip.height, clip.fps.round().clamp(1.0, 240.0) as i64)
     }
 }
 
