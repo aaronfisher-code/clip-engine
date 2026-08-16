@@ -218,7 +218,7 @@ jobs:
           if ! git push origin "HEAD:${GITHUB_REF_NAME}"; then
             echo "::warning::Could not update ${GITHUB_REF_NAME}; ${TAG} was still pushed."
           fi
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: dist/desktop
           merge-multiple: true
