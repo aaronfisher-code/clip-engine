@@ -160,7 +160,7 @@ jobs:
           7z x "$env:RUNNER_TEMP/mpv-dev.7z" -o"$env:RUNNER_TEMP/mpv-dev"
           & scripts/windows-mpv-msvc-lib.ps1 -ExtractDir "$env:RUNNER_TEMP/mpv-dev" -DllDestination "resources/binaries/mpv-2.dll"
       - name: Install cargo-packager
-        run: cargo install cargo-packager --locked
+        run: cargo install cargo-packager --version 0.11.8 --locked
       - name: Build release binary
         env:
           CARGO_TARGET_DIR: ${{ github.workspace }}/target
@@ -182,7 +182,11 @@ jobs:
         env:
           CARGO_TARGET_DIR: ${{ github.workspace }}/target
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          LINUXDEPLOY_EXCLUDED_LIBRARIES: libxkbcommon.so.0;libxkbcommon-x11.so.0
         run: cargo packager -p clip-engine --release --formats ${{ matrix.formats }}
+      - name: Reject bundled XKB libraries
+        if: runner.os == 'Linux'
+        run: bash scripts/assert-appimage-xkb.sh dist/desktop
       - uses: actions/upload-artifact@v7
         with:
           name: desktop-${{ matrix.platform }}
