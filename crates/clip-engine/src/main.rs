@@ -20,6 +20,7 @@ static AmdPowerXpressRequestHighPerformance: i32 = 1;
 mod app;
 mod player;
 mod theme;
+mod window_state;
 
 fn main() {
     isolate_linux_input();
@@ -75,15 +76,17 @@ fn check_runtime_files() -> anyhow::Result<()> {
 }
 
 fn native_options(icon: Arc<IconData>) -> eframe::NativeOptions {
-    #[allow(unused_mut)]
-    let mut options = eframe::NativeOptions {
-        viewport: ViewportBuilder::default()
-            .with_inner_size([1440.0, 900.0])
-            .with_min_inner_size([900.0, 620.0])
+    let viewport = window_state::WindowState::load().apply(
+        ViewportBuilder::default()
+            .with_min_inner_size(window_state::MIN_INNER_SIZE)
             .with_title(PRODUCT_NAME)
             .with_app_id("dev.dab.clip-engine")
             .with_drag_and_drop(true)
             .with_icon(icon),
+    );
+    #[allow(unused_mut)]
+    let mut options = eframe::NativeOptions {
+        viewport,
         renderer: Renderer::Glow,
         glow_options: GlowConfiguration {
             vsync: true,
