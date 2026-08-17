@@ -13,16 +13,17 @@ use tokio::process::Command;
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 fn hidden_command(program: impl AsRef<OsStr>) -> Command {
+    let mut command = Command::new(program);
     #[cfg(windows)]
     {
-        let mut command = Command::new(program);
         command.creation_flags(CREATE_NO_WINDOW);
-        command
     }
-    #[cfg(not(windows))]
-    {
-        Command::new(program)
-    }
+    // AppImage runtimes prepend bundled Ubuntu libraries. Host ffprobe then
+    // loads /usr/lib/libavutil against that older libva and dies with
+    // "undefined symbol: vaMapBuffer2". Bundled static FFmpeg does not need
+    // those paths either.
+    command.env_remove("LD_LIBRARY_PATH");
+    command
 }
 
 fn rate(value: Option<&str>) -> f64 {
