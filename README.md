@@ -36,7 +36,7 @@ Open the **[latest GitHub Release](https://github.com/aaronfisher-code/clip-engi
 
 After you install once, the app can update itself. On launch it checks GitHub for a newer release, and you can also choose **Check for updates** anytime.
 
-Windows may show a SmartScreen warning the first time because the installer is not yet widely signed. Choose **More info**, then **Run anyway**. Linux AppImages need execute permission once (`chmod +x` on the file, or your file manager’s “Allow executing” option).
+Windows may show a SmartScreen warning the first time because the installer is not yet widely signed. Choose **More info**, then **Run anyway**. The Windows installer includes an optional **Create a clip in File Explorer** checkbox; uncheck it if you do not want a right-click item on videos. Linux AppImages need execute permission once (`chmod +x` on the file, or your file manager’s “Allow executing” option).
 
 ---
 
@@ -59,6 +59,8 @@ Record  →  trim & mix locally  →  publish 1080p  →  send the link
 **Mix audio without cooking the picture.** Enable one track or several. The mix happens in the player; video stays untouched until you export.
 
 **GPU encode when you have it.** NVIDIA NVENC, Intel Quick Sync, and AMD AMF are detected at runtime, with a CPU fallback if needed. Output is 1080p, up to 120 fps.
+
+**Right-click to clip (Windows).** The installer can add a **Create a clip** item to File Explorer. It is a checkbox during setup, so you can leave it off. Choosing it opens that video in Clip Engine.
 
 **OBS-aware import.** Grab files with the system picker, or drop them from an inbox under your Videos folder.
 
