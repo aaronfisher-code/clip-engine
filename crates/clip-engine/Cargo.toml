@@ -71,12 +71,18 @@ template = "packaging/windows/installer.nsi"
 libs = ["libmpv.so.2"]
 # serde camelCase: excluded_libs is ignored. Use excluded-libraries / excludedLibs.
 # Do not bundle Ubuntu XKB/AT-SPI; they SIGSEGV against Arch/CachyOS host copies.
+# Do not bundle libva: host FFmpeg 7+ needs vaMapBuffer2 from a newer libva.so.2.
 excluded-libraries = [
     "libxkbcommon.so.0",
     "libxkbcommon-x11.so.0",
     "libatspi.so.0",
     "libatk-bridge-2.0.so.0",
     "libatk-1.0.so.0",
+    "libva.so.2",
+    "libva-drm.so.2",
+    "libva-x11.so.2",
+    "libva-wayland.so.2",
+    "libva-glx.so.2",
 ]
 
 [package.metadata.packager.deb]

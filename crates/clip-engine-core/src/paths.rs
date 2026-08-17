@@ -135,18 +135,43 @@ pub fn resource_dir() -> PathBuf {
         return PathBuf::from(value);
     }
     if let Ok(path) = std::env::current_exe() {
-        if let Some(directory) = path.parent() {
-            let next_to_exe = directory.join("resources");
-            if next_to_exe.is_dir() {
-                return next_to_exe;
-            }
-            let bundled = directory.join("binaries");
-            if bundled.is_dir() {
-                return directory.to_path_buf();
-            }
+        if let Some(directory) = resource_dir_for_executable(&path) {
+            return directory;
         }
     }
+    if let Some(directory) = std::env::var_os("APPDIR")
+        .map(PathBuf::from)
+        .and_then(|appdir| resource_dir_for_appdir(&appdir))
+    {
+        return directory;
+    }
     PathBuf::from("resources")
+}
+
+fn resource_dir_for_executable(exe: &Path) -> Option<PathBuf> {
+    let directory = exe.parent()?;
+    let next_to_exe = directory.join("resources");
+    if next_to_exe.is_dir() {
+        return Some(next_to_exe);
+    }
+    if directory.join("binaries").is_dir() {
+        return Some(directory.to_path_buf());
+    }
+    // cargo-packager Linux AppImage/deb: /usr/bin/clip-engine plus
+    // /usr/lib/clip-engine/binaries/{ffmpeg,ffprobe}.
+    let packager = directory.join("..").join("lib").join("clip-engine");
+    if packager.join("binaries").is_dir() {
+        return Some(packager.canonicalize().unwrap_or(packager));
+    }
+    None
+}
+
+fn resource_dir_for_appdir(appdir: &Path) -> Option<PathBuf> {
+    let packager = appdir.join("usr").join("lib").join("clip-engine");
+    packager
+        .join("binaries")
+        .is_dir()
+        .then(|| packager.canonicalize().unwrap_or_else(|_| packager.clone()))
 }
 
 #[cfg(test)]
@@ -163,5 +188,31 @@ mod tests {
         assert!(path_is_within(&file, &directory));
         assert!(!path_is_within(&file, &directory.join("missing")));
         std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn resource_dir_finds_packager_linux_layout() {
+        let root =
+            std::env::temp_dir().join(format!("clip-engine-appdir-{}", uuid::Uuid::new_v4()));
+        let exe = root.join("usr").join("bin").join("clip-engine");
+        let binaries = root
+            .join("usr")
+            .join("lib")
+            .join("clip-engine")
+            .join("binaries");
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(&binaries).unwrap();
+        std::fs::write(&exe, b"").unwrap();
+        std::fs::write(binaries.join("ffprobe"), b"").unwrap();
+        let discovered = resource_dir_for_executable(&exe).unwrap();
+        assert_eq!(
+            discovered.join("binaries").join("ffprobe"),
+            binaries.join("ffprobe")
+        );
+        assert_eq!(
+            resource_dir_for_appdir(&root).as_deref(),
+            Some(discovered.as_path())
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

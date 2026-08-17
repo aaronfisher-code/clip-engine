@@ -24,16 +24,16 @@ for image in "${images[@]}"; do
     chmod +x "${image}"
     "${image}" --appimage-extract >/dev/null
   )
-  matches="$(find "${extract}" -type f \( -name 'libxkbcommon.so*' -o -name 'libxkbcommon-x11.so*' \) -print || true)"
+  matches="$(find "${extract}" -type f \( -name 'libxkbcommon.so*' -o -name 'libxkbcommon-x11.so*' -o -name 'libva.so*' -o -name 'libva-*.so*' \) -print || true)"
   if [[ -n "${matches}" ]]; then
-    echo "AppImage still bundles XKB libraries:" >&2
+    echo "AppImage still bundles host-incompatible XKB or libva libraries:" >&2
     echo "${matches}" >&2
     failed=1
   fi
 done
 
 if [[ "${failed}" -ne 0 ]]; then
-  echo "Exclude libxkbcommon from the AppImage (package.metadata.packager.appimage.excluded-libraries)." >&2
+  echo "Exclude libxkbcommon and libva from the AppImage (package.metadata.packager.appimage.excluded-libraries)." >&2
   exit 1
 fi
-echo "No bundled libxkbcommon libraries."
+echo "No bundled libxkbcommon or libva libraries."
