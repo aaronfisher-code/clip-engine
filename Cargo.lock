@@ -755,7 +755,7 @@ dependencies = [
 
 [[package]]
 name = "clip-engine"
-version = "1.0.10"
+version = "1.0.11"
 dependencies = [
  "anyhow",
  "chrono",
@@ -779,7 +779,7 @@ dependencies = [
 
 [[package]]
 name = "clip-engine-core"
-version = "1.0.10"
+version = "1.0.11"
 dependencies = [
  "anyhow",
  "aws-credential-types",
