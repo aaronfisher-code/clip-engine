@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/clip-engine-core", "crates/clip-engine"]
 
 [workspace.package]
-version = "1.0.14"
+version = "1.0.15"
 edition = "2021"
 rust-version = "1.95"
 license = "MIT"
