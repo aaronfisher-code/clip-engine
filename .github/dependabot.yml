@@ -8,6 +8,21 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    groups:
+      rustcrypto-password:
+        patterns:
+          - sha2
+          - pbkdf2
+          - hmac
+          - digest
+    ignore:
+      # eframe 0.34+ replaces App::update; keep egui/wgpu on the same line.
+      - dependency-name: egui
+        update-types: ["version-update:semver-major"]
+      - dependency-name: eframe
+        update-types: ["version-update:semver-major"]
+      - dependency-name: wgpu
+        update-types: ["version-update:semver-major"]
   - package-ecosystem: github-actions
     directory: /
     schedule:
