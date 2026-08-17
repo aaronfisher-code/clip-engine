@@ -966,7 +966,7 @@ impl ClipApp {
                     });
                     ui.add_space(2.0);
                     ui.label(
-                        RichText::new("Downloaded from the published GitHub Release.")
+                        RichText::new(update_restart_note())
                             .color(theme::MUTED)
                             .size(12.0),
                     );
@@ -3061,6 +3061,12 @@ impl ClipApp {
                         ui.add_space(10.0);
                         ui.label(RichText::new(notes).size(13.0));
                     }
+                    ui.add_space(10.0);
+                    ui.label(
+                        RichText::new(update_restart_note())
+                            .color(theme::MUTED)
+                            .size(12.0),
+                    );
                     ui.add_space(12.0);
                     ui.horizontal(|ui| {
                         if ui
@@ -3113,11 +3119,24 @@ impl ClipApp {
                         .color(theme::MUTED)
                         .size(12.0),
                     );
+                    ui.add_space(8.0);
+                    ui.label(
+                        RichText::new(update_restart_note())
+                            .color(theme::MUTED)
+                            .size(12.0),
+                    );
                 }
                 UpdateModal::Installing => {
                     ui.label(
-                        RichText::new(format!("The installer is starting. {APP_NAME} will close."))
-                            .color(theme::MUTED),
+                        RichText::new("The installer is starting.")
+                            .family(theme::medium())
+                            .color(theme::ACCENT),
+                    );
+                    ui.add_space(8.0);
+                    ui.label(
+                        RichText::new(update_restart_note())
+                            .color(theme::MUTED)
+                            .size(12.0),
                     );
                 }
             }
@@ -3344,6 +3363,12 @@ impl ClipApp {
             self.created_reset = None;
         }
     }
+}
+
+fn update_restart_note() -> String {
+    format!(
+        "{APP_NAME} will close automatically once the update is installed. The new version takes effect the next time you launch."
+    )
 }
 
 fn condensed_release_notes(notes: &str) -> String {
