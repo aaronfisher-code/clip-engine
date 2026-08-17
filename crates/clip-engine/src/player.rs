@@ -213,6 +213,9 @@ impl Player {
             set_option(handle, "osd-level", "0")?;
             set_option(handle, "input-default-bindings", "no")?;
             set_option(handle, "input-vo-keyboard", "no")?;
+            let _ = set_option(handle, "input-terminal", "no");
+            let _ = set_option(handle, "input-media-keys", "no");
+            let _ = set_option(handle, "input-builtin-bindings", "no");
             set_option(handle, "audio-display", "no")?;
             set_option(handle, "interpolation", "no")?;
             set_option(handle, "video-sync", "display-desync")?;
