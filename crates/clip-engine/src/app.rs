@@ -1,5 +1,6 @@
 use crate::player::Player;
 use crate::theme;
+use crate::window_state::WindowPersistence;
 use clip_engine_core::cloud::{AccessRequest, AdminUser, CloudClip, CloudUser, PasswordReset};
 use clip_engine_core::models::{AppConfig, Clip, PublishJob, Selection};
 use clip_engine_core::paths::{default_inbox_dir, path_is_within, video_dir};
@@ -167,6 +168,7 @@ pub struct ClipApp {
     update_modal: Option<UpdateModal>,
     update_checking: bool,
     show_pending: bool,
+    window: WindowPersistence,
 }
 
 impl ClipApp {
@@ -251,6 +253,7 @@ impl ClipApp {
                     update_modal: None,
                     update_checking: false,
                     show_pending: false,
+                    window: WindowPersistence::load(),
                 };
                 app.schedule_update_check(false);
                 app.import_startup_files();
@@ -306,6 +309,7 @@ impl ClipApp {
             update_modal: None,
             update_checking: false,
             show_pending: false,
+            window: WindowPersistence::load(),
         };
         app.bootstrap_session();
         app.ensure_valid_selection();
@@ -680,7 +684,12 @@ impl ClipApp {
 }
 
 impl eframe::App for ClipApp {
-    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        if let Some(window) = frame.winit_window() {
+            if self.window.observe(window) {
+                ctx.request_repaint_after(Duration::from_millis(250));
+            }
+        }
         self.pump();
         self.expire_toasts(ctx);
         let previewing = self
@@ -722,6 +731,10 @@ impl eframe::App for ClipApp {
         {
             ctx.request_repaint();
         }
+    }
+
+    fn on_exit(&mut self, _gl: Option<&glow::Context>) {
+        self.window.flush();
     }
 
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
