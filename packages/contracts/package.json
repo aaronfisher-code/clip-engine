@@ -1,6 +1,6 @@
 {
   "name": "@clip-engine/contracts",
-  "version": "1.0.12",
+  "version": "1.0.13",
   "private": true,
   "type": "module",
   "exports": "./src/index.ts",
