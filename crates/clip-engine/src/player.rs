@@ -612,11 +612,9 @@ impl Player {
                             self.load_started = None;
                         }
                     }
-                    MPV_EVENT_PLAYBACK_RESTART => {
-                        if self.seek_in_flight {
-                            self.seek_in_flight = false;
-                            self.shared.seek_restarted.store(true, Ordering::SeqCst);
-                        }
+                    MPV_EVENT_PLAYBACK_RESTART if self.seek_in_flight => {
+                        self.seek_in_flight = false;
+                        self.shared.seek_restarted.store(true, Ordering::SeqCst);
                     }
                     _ => {}
                 }

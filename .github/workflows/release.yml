@@ -36,10 +36,10 @@ jobs:
       draft: ${{ steps.plan.outputs.draft }}
       apply: ${{ steps.plan.outputs.apply }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
       - id: plan
@@ -99,14 +99,14 @@ jobs:
     steps:
       - name: Keep LF line endings
         run: git config --global core.autocrlf false
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
           cache: npm
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.93.0
+          toolchain: 1.95.0
       - uses: Swatinem/rust-cache@v2
       - name: Apply release version
         if: needs.prepare.outputs.apply == 'true'
@@ -183,7 +183,7 @@ jobs:
           CARGO_TARGET_DIR: ${{ github.workspace }}/target
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: cargo packager -p clip-engine --release --formats ${{ matrix.formats }}
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: desktop-${{ matrix.platform }}
           path: dist/desktop/**
@@ -193,11 +193,11 @@ jobs:
     needs: [prepare, package]
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
           ref: ${{ github.sha }}
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
       - name: Tag the shipped version
@@ -218,11 +218,11 @@ jobs:
           if ! git push origin "HEAD:${GITHUB_REF_NAME}"; then
             echo "::warning::Could not update ${GITHUB_REF_NAME}; ${TAG} was still pushed."
           fi
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: dist/desktop
           merge-multiple: true
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ needs.prepare.outputs.tag }}
           name: Dabs Clip Engine ${{ needs.prepare.outputs.tag }}

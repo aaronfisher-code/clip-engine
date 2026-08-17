@@ -2,7 +2,8 @@
 
 use clip_engine_core::{Engine, PRODUCT_NAME};
 use eframe::egui::{IconData, ViewportBuilder};
-use eframe::{HardwareAcceleration, Renderer};
+use eframe::egui_glow::{GlowConfiguration, HardwareAcceleration};
+use eframe::Renderer;
 use std::sync::Arc;
 use tokio::runtime::Runtime;
 
@@ -39,13 +40,12 @@ fn run() -> anyhow::Result<()> {
     let icon = load_icon();
     let mut glow_options = native_options(icon);
     glow_options.renderer = Renderer::Glow;
-    glow_options.hardware_acceleration = HardwareAcceleration::Required;
+    glow_options.glow_options.hardware_acceleration = HardwareAcceleration::Required;
     match launch(engine.clone(), glow_options) {
         Ok(()) => Ok(()),
         Err(error) if should_try_wgpu(&error) => {
             let mut wgpu_options = native_options(load_icon());
             wgpu_options.renderer = Renderer::Wgpu;
-            wgpu_options.hardware_acceleration = HardwareAcceleration::Preferred;
             launch(engine, wgpu_options).map_err(|error| anyhow::anyhow!("{error}\n\n{GPU_HELP}"))
         }
         Err(error) => Err(anyhow::anyhow!("{error}\n\n{GPU_HELP}")),
@@ -83,9 +83,12 @@ fn native_options(icon: Arc<IconData>) -> eframe::NativeOptions {
             .with_app_id("dev.dab.clip-engine")
             .with_drag_and_drop(true)
             .with_icon(icon),
-        vsync: true,
         renderer: Renderer::Glow,
-        hardware_acceleration: HardwareAcceleration::Required,
+        glow_options: GlowConfiguration {
+            vsync: true,
+            hardware_acceleration: HardwareAcceleration::Required,
+            shader_version: None,
+        },
         ..Default::default()
     };
     // winit has no Wayland file-drop events. Prefer X11 so the OS can deliver drops.

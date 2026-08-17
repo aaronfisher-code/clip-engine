@@ -8,6 +8,21 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    groups:
+      rustcrypto-password:
+        patterns:
+          - sha2
+          - pbkdf2
+          - hmac
+          - digest
+      egui-stack:
+        patterns:
+          - egui
+          - eframe
+          - egui_glow
+          - glow
+          - wgpu
+          - winit
   - package-ecosystem: github-actions
     directory: /
     schedule:
