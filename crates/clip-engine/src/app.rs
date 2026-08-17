@@ -175,11 +175,6 @@ impl ClipApp {
         let (tx, rx) = mpsc::channel();
         let config = engine.config().unwrap_or_else(|_| AppConfig {
             source_directory: String::new(),
-            audio_track_labels: vec![
-                "Game / System".into(),
-                "Discord".into(),
-                "Microphone".into(),
-            ],
             authenticated: false,
             pending_access_request: false,
             r2_configured: false,
@@ -1927,7 +1922,7 @@ impl ClipApp {
                     if let Some(editor) = &mut self.editor {
                         for track in &clip.audio_tracks {
                             let mut enabled = editor.tracks.contains(&track.stream_index);
-                            let label = track_name(track, &self.config.audio_track_labels);
+                            let label = track_name(track);
                             theme::inset().show(ui, |ui| {
                                 if ui
                                     .checkbox(
@@ -3535,26 +3530,14 @@ fn expiry_label(expires_at: Option<&str>) -> String {
     format!("Expires in {days} day{}", if days == 1 { "" } else { "s" })
 }
 
-fn track_name(track: &clip_engine_core::AudioTrack, labels: &[String]) -> String {
+fn track_name(track: &clip_engine_core::AudioTrack) -> String {
     if let Some(title) = track
         .title
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
     {
-        let generic = title.eq_ignore_ascii_case("audio")
-            || title.to_ascii_lowercase().starts_with("track")
-            || title.to_ascii_lowercase().starts_with("audio track");
-        if !generic {
-            return title.to_string();
-        }
-    }
-    if let Some(label) = labels
-        .get(track.ordinal as usize)
-        .map(|value| value.trim())
-        .filter(|value| !value.is_empty())
-    {
-        return label.to_string();
+        return title.to_string();
     }
     if let Some(language) = track
         .language

@@ -69,13 +69,6 @@ impl Engine {
             .unwrap_or_else(|_| "libx264".into());
         Ok(AppConfig {
             source_directory: self.source_directory().to_string_lossy().to_string(),
-            audio_track_labels: self
-                .database
-                .setting("audio_track_labels")?
-                .unwrap_or_else(|| "Game / System,Discord,Microphone".into())
-                .split(',')
-                .map(|value| value.trim().to_string())
-                .collect(),
             authenticated: self.cloud.authenticated(),
             pending_access_request: self.cloud.pending_access_request(),
             r2_configured: self.cloud.authenticated(),
