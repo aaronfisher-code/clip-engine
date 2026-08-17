@@ -175,11 +175,6 @@ impl ClipApp {
         let (tx, rx) = mpsc::channel();
         let config = engine.config().unwrap_or_else(|_| AppConfig {
             source_directory: String::new(),
-            audio_track_labels: vec![
-                "Game / System".into(),
-                "Discord".into(),
-                "Microphone".into(),
-            ],
             authenticated: false,
             pending_access_request: false,
             r2_configured: false,
@@ -971,7 +966,7 @@ impl ClipApp {
                     });
                     ui.add_space(2.0);
                     ui.label(
-                        RichText::new("Downloaded from the published GitHub Release.")
+                        RichText::new(update_restart_note())
                             .color(theme::MUTED)
                             .size(12.0),
                     );
@@ -1927,7 +1922,7 @@ impl ClipApp {
                     if let Some(editor) = &mut self.editor {
                         for track in &clip.audio_tracks {
                             let mut enabled = editor.tracks.contains(&track.stream_index);
-                            let label = track_name(track, &self.config.audio_track_labels);
+                            let label = track_name(track);
                             theme::inset().show(ui, |ui| {
                                 if ui
                                     .checkbox(
@@ -3066,6 +3061,12 @@ impl ClipApp {
                         ui.add_space(10.0);
                         ui.label(RichText::new(notes).size(13.0));
                     }
+                    ui.add_space(10.0);
+                    ui.label(
+                        RichText::new(update_restart_note())
+                            .color(theme::MUTED)
+                            .size(12.0),
+                    );
                     ui.add_space(12.0);
                     ui.horizontal(|ui| {
                         if ui
@@ -3118,11 +3119,24 @@ impl ClipApp {
                         .color(theme::MUTED)
                         .size(12.0),
                     );
+                    ui.add_space(8.0);
+                    ui.label(
+                        RichText::new(update_restart_note())
+                            .color(theme::MUTED)
+                            .size(12.0),
+                    );
                 }
                 UpdateModal::Installing => {
                     ui.label(
-                        RichText::new(format!("The installer is starting. {APP_NAME} will close."))
-                            .color(theme::MUTED),
+                        RichText::new("The installer is starting.")
+                            .family(theme::medium())
+                            .color(theme::ACCENT),
+                    );
+                    ui.add_space(8.0);
+                    ui.label(
+                        RichText::new(update_restart_note())
+                            .color(theme::MUTED)
+                            .size(12.0),
                     );
                 }
             }
@@ -3351,6 +3365,12 @@ impl ClipApp {
     }
 }
 
+fn update_restart_note() -> String {
+    format!(
+        "{APP_NAME} will close automatically once the update is installed. The new version takes effect the next time you launch."
+    )
+}
+
 fn condensed_release_notes(notes: &str) -> String {
     let trimmed = notes.trim();
     if trimmed.is_empty() {
@@ -3535,26 +3555,14 @@ fn expiry_label(expires_at: Option<&str>) -> String {
     format!("Expires in {days} day{}", if days == 1 { "" } else { "s" })
 }
 
-fn track_name(track: &clip_engine_core::AudioTrack, labels: &[String]) -> String {
+fn track_name(track: &clip_engine_core::AudioTrack) -> String {
     if let Some(title) = track
         .title
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
     {
-        let generic = title.eq_ignore_ascii_case("audio")
-            || title.to_ascii_lowercase().starts_with("track")
-            || title.to_ascii_lowercase().starts_with("audio track");
-        if !generic {
-            return title.to_string();
-        }
-    }
-    if let Some(label) = labels
-        .get(track.ordinal as usize)
-        .map(|value| value.trim())
-        .filter(|value| !value.is_empty())
-    {
-        return label.to_string();
+        return title.to_string();
     }
     if let Some(language) = track
         .language

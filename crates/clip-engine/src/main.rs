@@ -22,6 +22,7 @@ mod player;
 mod theme;
 
 fn main() {
+    isolate_linux_input();
     install_panic_hook();
     if let Err(error) = run() {
         let message = format!("{error:#}");
@@ -138,6 +139,18 @@ fn load_icon() -> Arc<IconData> {
             width: 1,
             height: 1,
         }),
+    }
+}
+
+fn isolate_linux_input() {
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        // SAFETY: no threads exist yet. AT-SPI/GTK a11y panics abort the AppImage.
+        unsafe {
+            std::env::set_var("NO_AT_BRIDGE", "1");
+            std::env::set_var("GTK_A11Y", "none");
+            std::env::set_var("QT_ACCESSIBILITY", "0");
+        }
     }
 }
 

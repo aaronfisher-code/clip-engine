@@ -86,7 +86,6 @@ pub struct ExportConfig {
 #[serde(rename_all = "camelCase")]
 pub struct AppConfig {
     pub source_directory: String,
-    pub audio_track_labels: Vec<String>,
     pub authenticated: bool,
     pub pending_access_request: bool,
     pub r2_configured: bool,

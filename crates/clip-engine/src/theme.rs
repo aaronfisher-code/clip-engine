@@ -116,6 +116,11 @@ pub fn apply(ctx: &egui::Context) {
         style.spacing.indent = 14.0;
         style.spacing.scroll.floating_allocated_width = style.spacing.scroll.bar_width + 4.0;
     });
+
+    // egui 0.36 sends ViewportCommand::Close on Ctrl+Q. On Hyprland/XWayland the
+    // AppImage can report bogus modifiers, so editor keys would quit with no error.
+    ctx.options_mut(|options| options.quit_shortcuts.clear());
+    ctx.disable_accesskit();
 }
 
 pub fn top_frame() -> Frame {
