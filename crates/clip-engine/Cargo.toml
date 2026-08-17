@@ -69,7 +69,7 @@ template = "packaging/windows/installer.nsi"
 [package.metadata.packager.appimage]
 libs = ["libmpv.so.2"]
 # Host copies match local xkeyboard-config / AT-SPI. Ubuntu-bundled ones abort on keys.
-excluded_libs = [
+excluded_libraries = [
     "libxkbcommon.so*",
     "libxkbcommon-x11.so*",
     "libatspi.so*",
