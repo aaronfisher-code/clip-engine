@@ -91,32 +91,31 @@ pub fn apply(ctx: &egui::Context) {
     visuals.widgets.open.corner_radius = CornerRadius::same(4);
     ctx.set_visuals(visuals);
 
-    let mut style = (*ctx.style()).clone();
-    style
-        .text_styles
-        .insert(egui::TextStyle::Heading, FontId::new(20.0, medium()));
-    style.text_styles.insert(
-        egui::TextStyle::Body,
-        FontId::new(14.0, FontFamily::Proportional),
-    );
-    style.text_styles.insert(
-        egui::TextStyle::Button,
-        FontId::new(13.5, FontFamily::Proportional),
-    );
-    style.text_styles.insert(
-        egui::TextStyle::Small,
-        FontId::new(12.0, FontFamily::Proportional),
-    );
-    style.text_styles.insert(
-        egui::TextStyle::Monospace,
-        FontId::new(13.0, FontFamily::Monospace),
-    );
-    style.spacing.item_spacing = Vec2::new(10.0, 8.0);
-    style.spacing.button_padding = Vec2::new(12.0, 6.0);
-    style.spacing.indent = 14.0;
-    style.spacing.scroll.floating_allocated_width = style.spacing.scroll.bar_width + 4.0;
-    style.visuals = ctx.style().visuals.clone();
-    ctx.set_style(style);
+    ctx.style_mut_of(ctx.theme(), |style| {
+        style
+            .text_styles
+            .insert(egui::TextStyle::Heading, FontId::new(20.0, medium()));
+        style.text_styles.insert(
+            egui::TextStyle::Body,
+            FontId::new(14.0, FontFamily::Proportional),
+        );
+        style.text_styles.insert(
+            egui::TextStyle::Button,
+            FontId::new(13.5, FontFamily::Proportional),
+        );
+        style.text_styles.insert(
+            egui::TextStyle::Small,
+            FontId::new(12.0, FontFamily::Proportional),
+        );
+        style.text_styles.insert(
+            egui::TextStyle::Monospace,
+            FontId::new(13.0, FontFamily::Monospace),
+        );
+        style.spacing.item_spacing = Vec2::new(10.0, 8.0);
+        style.spacing.button_padding = Vec2::new(12.0, 6.0);
+        style.spacing.indent = 14.0;
+        style.spacing.scroll.floating_allocated_width = style.spacing.scroll.bar_width + 4.0;
+    });
 }
 
 pub fn top_frame() -> Frame {
@@ -292,7 +291,7 @@ pub fn buffering_overlay(ui: &Ui, rect: Rect) {
 }
 
 pub fn window_drop_overlay(ctx: &egui::Context) {
-    let screen = ctx.screen_rect();
+    let screen = ctx.content_rect();
     let painter = ctx.layer_painter(egui::LayerId::new(
         egui::Order::Foreground,
         egui::Id::new("window-drop-overlay"),
@@ -550,15 +549,14 @@ pub fn hotkey_button(ui: &mut Ui, key: &str, label: &str, key_first: bool) -> eg
     let height = (ui.text_style_height(&egui::TextStyle::Button)
         + ui.spacing().button_padding.y * 2.0)
         .max(ui.spacing().interact_size.y);
-    let key_galley =
-        ui.fonts(|fonts| fonts.layout_no_wrap(key.to_owned(), FontId::monospace(11.0), TEXT));
-    let label_galley = ui.fonts(|fonts| {
-        fonts.layout_no_wrap(
-            label.to_owned(),
-            FontId::new(13.5, FontFamily::Proportional),
-            TEXT,
-        )
-    });
+    let key_galley = ui
+        .painter()
+        .layout_no_wrap(key.to_owned(), FontId::monospace(11.0), TEXT);
+    let label_galley = ui.painter().layout_no_wrap(
+        label.to_owned(),
+        FontId::new(13.5, FontFamily::Proportional),
+        TEXT,
+    );
     let key_size = Vec2::new(
         (key_galley.size().x + 10.0).max(22.0),
         (key_galley.size().y + 5.0).max(18.0),

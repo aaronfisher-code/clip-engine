@@ -9,8 +9,8 @@ description = "Local library, FFmpeg export, and Cloudflare client for Dabs Clip
 
 [dependencies]
 anyhow = "1"
-aws-credential-types = "=1.2.14"
-aws-sdk-s3 = "=1.130.0"
+aws-credential-types = "1"
+aws-sdk-s3 = "1"
 base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
 keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }

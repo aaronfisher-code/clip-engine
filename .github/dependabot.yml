@@ -15,14 +15,14 @@ updates:
           - pbkdf2
           - hmac
           - digest
-    ignore:
-      # eframe 0.34+ replaces App::update; keep egui/wgpu on the same line.
-      - dependency-name: egui
-        update-types: ["version-update:semver-major"]
-      - dependency-name: eframe
-        update-types: ["version-update:semver-major"]
-      - dependency-name: wgpu
-        update-types: ["version-update:semver-major"]
+      egui-stack:
+        patterns:
+          - egui
+          - eframe
+          - egui_glow
+          - glow
+          - wgpu
+          - winit
   - package-ecosystem: github-actions
     directory: /
     schedule:

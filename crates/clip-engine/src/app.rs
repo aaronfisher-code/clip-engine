@@ -685,7 +685,7 @@ impl ClipApp {
 }
 
 impl eframe::App for ClipApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.pump();
         self.expire_toasts(ctx);
         let previewing = self
@@ -713,14 +713,32 @@ impl eframe::App for ClipApp {
         if processing {
             ctx.request_repaint();
         }
-        self.ingest_dropped_files(ctx);
+        self.stop_at_out_point();
+        if self
+            .player
+            .as_ref()
+            .is_some_and(|player| player.playing() || player.buffering() || player.wants_redraw())
+            || matches!(self.export_modal, Some(ExportModal::Working { .. }))
+            || matches!(
+                self.update_modal,
+                Some(UpdateModal::Downloading { .. } | UpdateModal::Installing)
+            )
+            || self.update_checking
+        {
+            ctx.request_repaint();
+        }
+    }
+
+    fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
+        self.ingest_dropped_files(&ctx);
         if self.drop_hovering {
             ctx.request_repaint();
         }
 
-        egui::TopBottomPanel::top("topbar")
+        egui::Panel::top("topbar")
             .frame(theme::top_frame())
-            .show(ctx, |ui| {
+            .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.set_height(36.0);
                     if theme::library_menu_button(ui, self.library_open).clicked() {
@@ -810,26 +828,26 @@ impl eframe::App for ClipApp {
             });
 
         if self.library_open {
-            let library_width = (ctx.screen_rect().width() * 0.24).clamp(280.0, 400.0);
-            egui::SidePanel::left("library")
+            let library_width = (ctx.content_rect().width() * 0.24).clamp(280.0, 400.0);
+            egui::Panel::left("library")
                 .resizable(true)
-                .default_width(library_width)
-                .min_width(240.0)
-                .max_width(480.0)
+                .default_size(library_width)
+                .min_size(240.0)
+                .max_size(480.0)
                 .frame(theme::side_frame())
-                .show(ctx, |ui| {
+                .show(ui, |ui| {
                     self.library_panel(ui);
                 });
         }
 
         egui::CentralPanel::default()
             .frame(theme::central_frame())
-            .show(ctx, |ui| {
+            .show(ui, |ui| {
                 self.status_banner(ui);
                 if let Some(clip_id) = self.selected_id.clone() {
                     if let Some(index) = self.clips.iter().position(|clip| clip.id == clip_id) {
                         let clip = self.clips[index].clone();
-                        self.editor_panel(ui, ctx, &clip);
+                        self.editor_panel(ui, &ctx, &clip);
                     }
                 } else {
                     ui.centered_and_justified(|ui| {
@@ -844,55 +862,39 @@ impl eframe::App for ClipApp {
             });
 
         if self.show_auth.is_some() {
-            self.auth_modal(ctx);
+            self.auth_modal(&ctx);
         }
         if self.show_pending
             && self.access_request.is_some()
             && !self.config.authenticated
             && self.show_auth.is_none()
         {
-            self.pending_modal(ctx);
+            self.pending_modal(&ctx);
         }
         if self.show_access {
-            self.access_modal(ctx);
+            self.access_modal(&ctx);
         }
         if self.created_reset.is_some() {
-            self.reset_modal(ctx);
+            self.reset_modal(&ctx);
         }
         if self.pending_delete_job.is_some() {
-            self.delete_version_modal(ctx);
+            self.delete_version_modal(&ctx);
         }
         if self.pending_delete_clip.is_some() {
-            self.delete_clip_modal(ctx);
+            self.delete_clip_modal(&ctx);
         }
         if self.publish_modal.is_some() {
-            self.publish_flow_modal(ctx);
+            self.publish_flow_modal(&ctx);
         }
         if self.export_modal.is_some() {
-            self.export_flow_modal(ctx);
+            self.export_flow_modal(&ctx);
         }
         if self.update_modal.is_some() {
-            self.update_flow_modal(ctx);
+            self.update_flow_modal(&ctx);
         }
 
         if self.drop_hovering {
-            theme::window_drop_overlay(ctx);
-        }
-
-        self.stop_at_out_point();
-
-        if self
-            .player
-            .as_ref()
-            .is_some_and(|player| player.playing() || player.buffering() || player.wants_redraw())
-            || matches!(self.export_modal, Some(ExportModal::Working { .. }))
-            || matches!(
-                self.update_modal,
-                Some(UpdateModal::Downloading { .. } | UpdateModal::Installing)
-            )
-            || self.update_checking
-        {
-            ctx.request_repaint();
+            theme::window_drop_overlay(&ctx);
         }
     }
 }
@@ -1214,9 +1216,8 @@ impl ClipApp {
                 .dropped_files
                 .iter()
                 .filter_map(|file| {
-                    file.path
-                        .clone()
-                        .or_else(|| (!file.name.is_empty()).then(|| PathBuf::from(&file.name)))
+                    let path = file.path();
+                    (!path.as_os_str().is_empty()).then(|| path.to_path_buf())
                 })
                 .collect::<Vec<_>>()
         });
@@ -1627,7 +1628,7 @@ impl ClipApp {
         }
 
         let time = self.playback_time();
-        if !ctx.wants_keyboard_input() {
+        if !ctx.egui_wants_keyboard_input() {
             // Read keys first: play/seek can request a repaint, which deadlocks inside `ui.input`.
             let (space, left, right, mark_in, mark_out, shift) = ui.input(|input| {
                 (

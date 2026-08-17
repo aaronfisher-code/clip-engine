@@ -51,7 +51,7 @@ the exact video and thumbnail keys created for one upload.
 
 ## Local development
 
-Install Node.js 24, Rust 1.93, FFmpeg/FFprobe, and libmpv (plus headers) on the
+Install Node.js 24, Rust 1.95, FFmpeg/FFprobe, and libmpv (plus headers) on the
 development machine. Then run:
 
 ```bash
