@@ -457,7 +457,8 @@ Function .onInit
  Call ApplyExplorerContextMenuDefault
 FunctionEnd
 
-Section EarlyChecks
+; Hidden: NSIS shows every named Section on the components page.
+Section "-EarlyChecks"
  ; Abort silent installer if downgrades is disabled
  !if "${ALLOWDOWNGRADES}" == "false"
  IfSilent 0 silent_downgrades_done
