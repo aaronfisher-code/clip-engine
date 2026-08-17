@@ -59,6 +59,7 @@ resources = [
 [package.metadata.packager.nsis]
 installer-mode = "currentUser"
 installer-icon = "assets/clip-engine.ico"
+template = "packaging/windows/installer.nsi"
 
 [package.metadata.packager.appimage]
 libs = ["libmpv.so.2"]

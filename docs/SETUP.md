@@ -79,7 +79,11 @@ npm test
 `npm run build:desktop` copies FFmpeg and FFprobe from `PATH` and builds a release
 binary. Official releases download static x86-64 FFmpeg builds in CI and package
 Windows/Linux installers with cargo-packager so friends do not need to install FFmpeg
-separately. libmpv is bundled with those installers.
+separately. libmpv is bundled with those installers. The Windows NSIS script is
+vendored at `crates/clip-engine/packaging/windows/installer.nsi` so the installer can
+offer an optional File Explorer **Create a clip** verb (mkv, mp4, mov, webm, avi, m4v)
+without replacing the default video player. Silent in-app updates keep the user's last
+choice; they do not add the verb unless it was already enabled.
 
 ## Production setup, step by step
 

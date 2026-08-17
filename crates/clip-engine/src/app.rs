@@ -13,6 +13,7 @@ use eframe::egui::{
 };
 use raw_window_handle::HasDisplayHandle;
 use std::collections::HashMap;
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
@@ -35,6 +36,7 @@ enum Message {
     Error(String),
     Notice(String),
     Refresh,
+    Imported(Vec<String>),
     User(CloudUser),
     LoggedOut,
     CloudClips(Vec<CloudClip>),
@@ -256,6 +258,7 @@ impl ClipApp {
                     show_pending: false,
                 };
                 app.schedule_update_check(false);
+                app.import_startup_files();
                 return app;
             }
         };
@@ -312,6 +315,7 @@ impl ClipApp {
         app.bootstrap_session();
         app.ensure_valid_selection();
         app.schedule_update_check(false);
+        app.import_startup_files();
         app
     }
 
@@ -482,6 +486,15 @@ impl ClipApp {
                 Message::Refresh => {
                     self.reload_library();
                     self.busy = false;
+                }
+                Message::Imported(ids) => {
+                    self.reload_library();
+                    self.busy = false;
+                    if let Some(id) = ids.into_iter().next() {
+                        self.selected_id = Some(id);
+                        self.editor = None;
+                        self.time_edit = None;
+                    }
                 }
                 Message::User(user) => {
                     self.user = Some(user);
@@ -1232,14 +1245,24 @@ impl ClipApp {
         }
     }
 
+    fn import_startup_files(&mut self) {
+        let files = media_paths_from_args(std::env::args_os());
+        if files.is_empty() {
+            return;
+        }
+        self.import_paths(files);
+    }
+
     fn import_paths(&mut self, files: Vec<PathBuf>) {
         if files.is_empty() {
             return;
         }
         let engine = self.engine.clone();
         self.run_async(async move {
-            engine.import_clips(files).await?;
-            Ok(Message::Refresh)
+            let clips = engine.import_clips(files).await?;
+            Ok(Message::Imported(
+                clips.into_iter().map(|clip| clip.id).collect(),
+            ))
         });
     }
 
@@ -3480,6 +3503,22 @@ fn collect_import_paths(paths: impl IntoIterator<Item = PathBuf>) -> Vec<PathBuf
     files
 }
 
+fn is_cli_flag(arg: &OsStr) -> bool {
+    arg.to_str().is_some_and(|value| {
+        value.starts_with('-') || matches!(value, "/S" | "/NS" | "/UPDATE" | "/P" | "/R")
+    })
+}
+
+fn media_paths_from_args(args: impl IntoIterator<Item = impl AsRef<OsStr>>) -> Vec<PathBuf> {
+    collect_import_paths(
+        args.into_iter()
+            .skip(1)
+            .map(|arg| arg.as_ref().to_os_string())
+            .filter(|arg| !is_cli_flag(arg))
+            .map(PathBuf::from),
+    )
+}
+
 fn expiry_label(expires_at: Option<&str>) -> String {
     let Some(expires_at) = expires_at else {
         return "Expiry pending".into();
@@ -3525,4 +3564,39 @@ fn track_name(track: &clip_engine_core::AudioTrack, labels: &[String]) -> String
         return language.to_string();
     }
     format!("Audio {}", track.ordinal + 1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_cli_flag, media_paths_from_args};
+    use std::ffi::OsStr;
+    use std::path::PathBuf;
+
+    #[test]
+    fn cli_flags_are_detected() {
+        assert!(is_cli_flag(OsStr::new("--help")));
+        assert!(is_cli_flag(OsStr::new("/S")));
+        assert!(is_cli_flag(OsStr::new("/UPDATE")));
+        assert!(!is_cli_flag(OsStr::new(r"C:\clips\round.mkv")));
+        assert!(!is_cli_flag(OsStr::new("round.mp4")));
+    }
+
+    #[test]
+    fn startup_args_keep_video_paths() {
+        let paths = media_paths_from_args([
+            "clip-engine",
+            "/S",
+            r"D:\Videos\highlight.mkv",
+            "--ignored",
+            "notes.txt",
+            "take.mp4",
+        ]);
+        assert_eq!(
+            paths,
+            vec![
+                PathBuf::from(r"D:\Videos\highlight.mkv"),
+                PathBuf::from("take.mp4"),
+            ]
+        );
+    }
 }
