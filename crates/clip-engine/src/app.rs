@@ -1309,7 +1309,7 @@ impl ClipApp {
         if let Some(editor) = &self.editor {
             if self.playback_time() + 0.01 >= editor.end {
                 let start = editor.start;
-                self.activate_player(true);
+                self.activate_player(false);
                 if let Some(player) = &mut self.player {
                     player.seek_and_play(start);
                 }
@@ -1605,37 +1605,36 @@ impl ClipApp {
 
         let time = self.playback_time();
         if !ctx.wants_keyboard_input() {
-            ui.input(|input| {
-                if input.key_pressed(egui::Key::Space) {
-                    self.toggle_playback();
-                }
-                if input.key_pressed(egui::Key::ArrowLeft) {
-                    let delta = if input.modifiers.shift {
-                        -1.0
-                    } else {
-                        -frame_step
-                    };
-                    self.step_frame(delta);
-                }
-                if input.key_pressed(egui::Key::ArrowRight) {
-                    let delta = if input.modifiers.shift {
-                        1.0
-                    } else {
-                        frame_step
-                    };
-                    self.step_frame(delta);
-                }
-                if input.key_pressed(egui::Key::I) {
-                    if let Some(editor) = &mut self.editor {
-                        editor.start = time.min(editor.end - 0.05).max(0.0);
-                    }
-                }
-                if input.key_pressed(egui::Key::O) {
-                    if let Some(editor) = &mut self.editor {
-                        editor.end = time.max(editor.start + 0.05).min(clip.duration);
-                    }
-                }
+            // Read keys first: play/seek can request a repaint, which deadlocks inside `ui.input`.
+            let (space, left, right, mark_in, mark_out, shift) = ui.input(|input| {
+                (
+                    input.key_pressed(egui::Key::Space),
+                    input.key_pressed(egui::Key::ArrowLeft),
+                    input.key_pressed(egui::Key::ArrowRight),
+                    input.key_pressed(egui::Key::I),
+                    input.key_pressed(egui::Key::O),
+                    input.modifiers.shift,
+                )
             });
+            if space {
+                self.toggle_playback();
+            }
+            if left {
+                self.step_frame(if shift { -1.0 } else { -frame_step });
+            }
+            if right {
+                self.step_frame(if shift { 1.0 } else { frame_step });
+            }
+            if mark_in {
+                if let Some(editor) = &mut self.editor {
+                    editor.start = time.min(editor.end - 0.05).max(0.0);
+                }
+            }
+            if mark_out {
+                if let Some(editor) = &mut self.editor {
+                    editor.end = time.max(editor.start + 0.05).min(clip.duration);
+                }
+            }
         }
     }
 
