@@ -7,8 +7,11 @@ pub struct AppPaths {
     pub source: PathBuf,
     pub previews: PathBuf,
     pub exports: PathBuf,
+    pub recorder_replays: PathBuf,
+    pub recorder_staging: PathBuf,
     pub ffmpeg: PathBuf,
     pub ffprobe: PathBuf,
+    pub resource: PathBuf,
 }
 
 impl AppPaths {
@@ -50,9 +53,12 @@ impl AppPaths {
             source,
             previews: data.join("previews"),
             exports: data.join("exports"),
+            recorder_replays: data.join("recorder").join("replays"),
+            recorder_staging: data.join("recorder").join("staging"),
             data,
             ffmpeg,
             ffprobe,
+            resource: resource.to_path_buf(),
         };
         std::fs::create_dir_all(&value.data)?;
         if std::fs::create_dir_all(&value.source).is_err() {
@@ -61,7 +67,44 @@ impl AppPaths {
         }
         std::fs::create_dir_all(&value.previews)?;
         std::fs::create_dir_all(&value.exports)?;
+        std::fs::create_dir_all(&value.recorder_replays)?;
+        std::fs::create_dir_all(&value.recorder_staging)?;
         Ok(value)
+    }
+
+    pub fn recorder_binary(&self) -> PathBuf {
+        let executable = if cfg!(windows) { ".exe" } else { "" };
+        let name = format!("clip-engine-recorder{executable}");
+        if let Some(path) = std::env::var_os("CLIP_ENGINE_RECORDER") {
+            return PathBuf::from(path);
+        }
+        let mut candidates = vec![
+            self.resource.join("binaries").join(&name),
+            self.resource.join(&name),
+        ];
+        if let Ok(current_exe) = std::env::current_exe() {
+            if let Some(parent) = current_exe.parent() {
+                candidates.push(parent.join(&name));
+                candidates.push(parent.join("binaries").join(&name));
+                candidates.push(
+                    parent
+                        .join("..")
+                        .join("lib")
+                        .join("clip-engine")
+                        .join("binaries")
+                        .join(&name),
+                );
+            }
+        }
+        candidates
+            .into_iter()
+            .find(|candidate| candidate.is_file())
+            .unwrap_or_else(|| self.resource.join("binaries").join(name))
+    }
+
+    pub fn recorder_obs_root(&self) -> Option<PathBuf> {
+        let root = self.resource.join("obs");
+        (root.join("data").is_dir() && root.join("obs-plugins").is_dir()).then_some(root)
     }
 }
 

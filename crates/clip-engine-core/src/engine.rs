@@ -6,6 +6,9 @@ use crate::database::Database;
 use crate::media;
 use crate::models::{AppConfig, Clip, ExportConfig, PublishJob, Selection};
 use crate::paths::AppPaths;
+use crate::recorder::RecorderSupervisor;
+use anyhow::Context;
+use clip_engine_recorder_protocol::{RecorderCapabilities, RecorderConfig, RecorderStatus};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -17,6 +20,7 @@ pub struct Engine {
     pub cloud: CloudClient,
     pub encoder: Arc<RwLock<String>>,
     pub quality: i64,
+    pub recorder: RecorderSupervisor,
     runtime: Arc<tokio::runtime::Handle>,
 }
 
@@ -39,12 +43,17 @@ impl Engine {
         });
         let cloud = CloudClient::new(api_base)?;
         let encoder = Arc::new(RwLock::new("libx264".to_string()));
+        let recorder_config = database
+            .recorder_config()?
+            .unwrap_or_else(RecorderConfig::default);
+        let recorder = RecorderSupervisor::new(paths.clone(), recorder_config);
         let engine = Self {
             paths: paths.clone(),
             database,
             cloud,
             encoder: encoder.clone(),
             quality: 20,
+            recorder,
             runtime: Arc::new(handle),
         };
         let detect_paths = engine.paths.clone();
@@ -87,7 +96,47 @@ impl Engine {
                 codec: encoder,
                 crf: self.quality,
             },
+            recorder: self.recorder_config(),
         })
+    }
+
+    pub fn recorder_config(&self) -> RecorderConfig {
+        self.recorder.config()
+    }
+
+    pub fn recorder_status(&self) -> RecorderStatus {
+        self.recorder.status()
+    }
+
+    pub fn recorder_capabilities(&self) -> RecorderCapabilities {
+        self.recorder.capabilities()
+    }
+
+    pub fn refresh_recorder(&self) -> anyhow::Result<(RecorderCapabilities, RecorderStatus)> {
+        self.recorder.refresh()
+    }
+
+    pub fn apply_recorder_config(&self, mut config: RecorderConfig) -> anyhow::Result<()> {
+        config.output_directory = self.paths.recorder_replays.to_string_lossy().to_string();
+        self.recorder.apply_config(config.clone())?;
+        self.database.put_recorder_config(&config)?;
+        Ok(())
+    }
+
+    pub fn start_recorder(&self) -> anyhow::Result<()> {
+        self.recorder.start()
+    }
+
+    pub fn stop_recorder(&self) -> anyhow::Result<()> {
+        self.recorder.stop()
+    }
+
+    pub fn save_recorder_replay(&self) -> anyhow::Result<Option<PathBuf>> {
+        self.recorder.save_replay()
+    }
+
+    pub fn shutdown_recorder(&self) {
+        self.recorder.shutdown();
     }
 
     pub fn clips(&self) -> anyhow::Result<Vec<Clip>> {
@@ -193,6 +242,7 @@ impl Engine {
     }
 
     pub async fn scan_clips(&self) -> anyhow::Result<Vec<Clip>> {
+        self.import_recorder_replays().await?;
         let source = self.source_directory();
         if !source.is_dir() {
             anyhow::bail!("Inbox folder does not exist: {}", source.display());
@@ -205,6 +255,57 @@ impl Engine {
             }
         }
         self.database.clips()
+    }
+
+    pub async fn import_recorder_replays(&self) -> anyhow::Result<Vec<Clip>> {
+        let directory = &self.paths.recorder_replays;
+        if !directory.is_dir() {
+            return Ok(Vec::new());
+        }
+        let mut imported = Vec::new();
+        let mut entries = tokio::fs::read_dir(directory).await?;
+        while let Some(entry) = entries.next_entry().await? {
+            let source = entry.path();
+            if !source.is_file() || !supported(&source) {
+                continue;
+            }
+            let Some(file_name) = source.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            let mut destination = self.source_directory().join(file_name);
+            if destination.exists() {
+                destination = self.source_directory().join(format!(
+                    "{}-{}{}",
+                    destination
+                        .file_stem()
+                        .and_then(|stem| stem.to_str())
+                        .unwrap_or("replay"),
+                    &uuid::Uuid::new_v4().simple().to_string()[..8],
+                    destination
+                        .extension()
+                        .and_then(|extension| extension.to_str())
+                        .map(|extension| format!(".{extension}"))
+                        .unwrap_or_default()
+                ));
+            }
+            if let Some(parent) = destination.parent() {
+                tokio::fs::create_dir_all(parent).await?;
+            }
+            if let Err(rename_error) = tokio::fs::rename(&source, &destination).await {
+                tokio::fs::copy(&source, &destination)
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "move recorder replay {} to {} ({rename_error})",
+                            source.display(),
+                            destination.display()
+                        )
+                    })?;
+                tokio::fs::remove_file(&source).await?;
+            }
+            imported.push(self.register_path(destination).await?);
+        }
+        Ok(imported)
     }
 
     pub async fn delete_clip(&self, id: &str) -> anyhow::Result<u64> {

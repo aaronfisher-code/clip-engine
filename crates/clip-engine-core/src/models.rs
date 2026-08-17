@@ -1,3 +1,4 @@
+use clip_engine_recorder_protocol::RecorderConfig;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -94,6 +95,8 @@ pub struct AppConfig {
     pub media_base_url: Option<String>,
     pub platform: String,
     pub export: ExportConfig,
+    #[serde(default)]
+    pub recorder: RecorderConfig,
 }
 
 #[derive(Debug, Deserialize)]

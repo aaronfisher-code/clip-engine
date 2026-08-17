@@ -1,6 +1,11 @@
 [workspace]
 resolver = "2"
-members = ["crates/clip-engine-core", "crates/clip-engine"]
+members = [
+    "crates/clip-engine-core",
+    "crates/clip-engine",
+    "crates/clip-engine-recorder-protocol",
+    "crates/clip-engine-recorder",
+]
 
 [workspace.package]
 version = "1.0.0"

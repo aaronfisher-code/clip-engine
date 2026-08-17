@@ -5,8 +5,9 @@ use clip_engine_core::cloud::{AccessRequest, AdminUser, CloudClip, CloudUser, Pa
 use clip_engine_core::models::{AppConfig, Clip, PublishJob, Selection};
 use clip_engine_core::paths::{default_inbox_dir, path_is_within, video_dir};
 use clip_engine_core::{
-    export_options, format_file_size, install_desktop_update, safe_base_name, AvailableUpdate,
-    Engine, PublishOption, APP_NAME, PRODUCT_NAME,
+    export_options, format_file_size, install_desktop_update, safe_base_name, AudioRoute,
+    AvailableUpdate, CaptureBackend, EncoderCapability, Engine, PublishOption, Rational,
+    RecorderCapabilities, RecorderConfig, RecorderState, RecorderStatus, APP_NAME, PRODUCT_NAME,
 };
 use eframe::egui::{
     self, Align, Color32, ColorImage, CornerRadius, CursorIcon, Layout, Pos2, Rect, RichText,
@@ -56,6 +57,11 @@ enum Message {
         total: u64,
     },
     UpdateDownloaded(PathBuf),
+    RecorderRefreshed {
+        capabilities: RecorderCapabilities,
+        status: RecorderStatus,
+    },
+    RecorderImported(Vec<String>),
 }
 
 struct EditorState {
@@ -168,6 +174,11 @@ pub struct ClipApp {
     update_modal: Option<UpdateModal>,
     update_checking: bool,
     show_pending: bool,
+    show_recorder: bool,
+    recorder_config: RecorderConfig,
+    recorder_capabilities: RecorderCapabilities,
+    recorder_status: RecorderStatus,
+    last_recorder_refresh: Instant,
     window: WindowPersistence,
 }
 
@@ -191,6 +202,7 @@ impl ClipApp {
                 codec: "libx264".into(),
                 crf: 20,
             },
+            recorder: clip_engine_core::RecorderConfig::default(),
         });
         let clips = engine.clips().unwrap_or_default();
         let jobs = engine.jobs().unwrap_or_default();
@@ -201,6 +213,8 @@ impl ClipApp {
             }
         }
         let clips = engine.clips().unwrap_or(clips);
+        let recorder_capabilities = engine.recorder_capabilities();
+        let recorder_status = engine.recorder_status();
         let player = match Player::new(&cc.egui_ctx, cc.gl.is_some(), cc.display_handle().ok()) {
             Ok(player) => Some(player),
             Err(error) => {
@@ -208,7 +222,7 @@ impl ClipApp {
                     player: None,
                     player_error: Some(error.to_string()),
                     engine,
-                    config,
+                    config: config.clone(),
                     clips,
                     jobs,
                     cloud_clips: Vec::new(),
@@ -253,6 +267,11 @@ impl ClipApp {
                     update_modal: None,
                     update_checking: false,
                     show_pending: false,
+                    show_recorder: false,
+                    recorder_config: config.recorder.clone(),
+                    recorder_capabilities: recorder_capabilities.clone(),
+                    recorder_status: recorder_status.clone(),
+                    last_recorder_refresh: Instant::now() - Duration::from_secs(10),
                     window: WindowPersistence::load(),
                 };
                 app.schedule_update_check(false);
@@ -309,6 +328,11 @@ impl ClipApp {
             update_modal: None,
             update_checking: false,
             show_pending: false,
+            show_recorder: false,
+            recorder_config: config.recorder.clone(),
+            recorder_capabilities,
+            recorder_status,
+            last_recorder_refresh: Instant::now() - Duration::from_secs(10),
             window: WindowPersistence::load(),
         };
         app.bootstrap_session();
@@ -592,6 +616,23 @@ impl ClipApp {
                         }
                     }
                 }
+                Message::RecorderRefreshed {
+                    capabilities,
+                    status,
+                } => {
+                    self.recorder_capabilities = capabilities;
+                    self.recorder_status = status;
+                    self.busy = false;
+                }
+                Message::RecorderImported(ids) => {
+                    self.reload_library();
+                    self.busy = false;
+                    if let Some(id) = ids.into_iter().next() {
+                        self.selected_id = Some(id);
+                        self.editor = None;
+                        self.time_edit = None;
+                    }
+                }
             }
         }
     }
@@ -691,6 +732,7 @@ impl eframe::App for ClipApp {
             }
         }
         self.pump();
+        self.poll_recorder();
         self.expire_toasts(ctx);
         let previewing = self
             .clips
@@ -734,6 +776,7 @@ impl eframe::App for ClipApp {
     }
 
     fn on_exit(&mut self, _gl: Option<&glow::Context>) {
+        self.engine.shutdown_recorder();
         self.window.flush();
     }
 
@@ -766,6 +809,16 @@ impl eframe::App for ClipApp {
                                 .size(11.5),
                         );
                     });
+                    if ui
+                        .selectable_label(self.show_recorder, "Recorder")
+                        .on_hover_text("Configure and control the libobs replay recorder")
+                        .clicked()
+                    {
+                        self.show_recorder = !self.show_recorder;
+                        if self.show_recorder {
+                            self.refresh_recorder();
+                        }
+                    }
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         let label = if self.config.authenticated {
                             self.user
@@ -851,21 +904,25 @@ impl eframe::App for ClipApp {
         egui::CentralPanel::default()
             .frame(theme::central_frame())
             .show(ui, |ui| {
-                self.status_banner(ui);
-                if let Some(clip_id) = self.selected_id.clone() {
-                    if let Some(index) = self.clips.iter().position(|clip| clip.id == clip_id) {
-                        let clip = self.clips[index].clone();
-                        self.editor_panel(ui, &ctx, &clip);
-                    }
+                if self.show_recorder {
+                    self.recorder_panel(ui);
                 } else {
-                    ui.centered_and_justified(|ui| {
-                        ui.label(
-                            RichText::new("Upload some clips to get started")
-                                .family(theme::medium())
-                                .size(18.0)
-                                .color(theme::MUTED),
-                        );
-                    });
+                    self.status_banner(ui);
+                    if let Some(clip_id) = self.selected_id.clone() {
+                        if let Some(index) = self.clips.iter().position(|clip| clip.id == clip_id) {
+                            let clip = self.clips[index].clone();
+                            self.editor_panel(ui, &ctx, &clip);
+                        }
+                    } else {
+                        ui.centered_and_justified(|ui| {
+                            ui.label(
+                                RichText::new("Upload some clips to get started")
+                                    .family(theme::medium())
+                                    .size(18.0)
+                                    .color(theme::MUTED),
+                            );
+                        });
+                    }
                 }
             });
 
@@ -908,6 +965,432 @@ impl eframe::App for ClipApp {
 }
 
 impl ClipApp {
+    fn refresh_recorder(&mut self) {
+        if self.busy {
+            return;
+        }
+        let engine = self.engine.clone();
+        self.run_async(async move {
+            let (capabilities, status) = engine.refresh_recorder()?;
+            Ok(Message::RecorderRefreshed {
+                capabilities,
+                status,
+            })
+        });
+    }
+
+    fn apply_recorder_config(&mut self) {
+        let engine = self.engine.clone();
+        let config = self.recorder_config.clone();
+        self.run_async(async move {
+            engine.apply_recorder_config(config)?;
+            let (capabilities, status) = engine.refresh_recorder()?;
+            Ok(Message::RecorderRefreshed {
+                capabilities,
+                status,
+            })
+        });
+    }
+
+    fn start_recorder(&mut self) {
+        let engine = self.engine.clone();
+        let config = self.recorder_config.clone();
+        self.run_async(async move {
+            engine.apply_recorder_config(config)?;
+            engine.start_recorder()?;
+            let (capabilities, status) = engine.refresh_recorder()?;
+            Ok(Message::RecorderRefreshed {
+                capabilities,
+                status,
+            })
+        });
+    }
+
+    fn stop_recorder(&mut self) {
+        let engine = self.engine.clone();
+        self.run_async(async move {
+            engine.stop_recorder()?;
+            let (capabilities, status) = engine.refresh_recorder()?;
+            Ok(Message::RecorderRefreshed {
+                capabilities,
+                status,
+            })
+        });
+    }
+
+    fn save_recorder_replay(&mut self) {
+        let engine = self.engine.clone();
+        self.run_async(async move {
+            engine.save_recorder_replay()?;
+            let clips = engine.import_recorder_replays().await?;
+            Ok(Message::RecorderImported(
+                clips.into_iter().map(|clip| clip.id).collect(),
+            ))
+        });
+    }
+
+    fn poll_recorder(&mut self) {
+        if self.last_recorder_refresh.elapsed() < Duration::from_secs(2) {
+            return;
+        }
+        self.last_recorder_refresh = Instant::now();
+        let engine = self.engine.clone();
+        let tx = self.tx.clone();
+        let refresh = (self.show_recorder || self.recorder_status.replay_active) && !self.busy;
+        self.engine.spawn(async move {
+            if refresh {
+                if let Ok((capabilities, status)) = engine.refresh_recorder() {
+                    let _ = tx.send(Message::RecorderRefreshed {
+                        capabilities,
+                        status,
+                    });
+                }
+            }
+            if let Ok(clips) = engine.import_recorder_replays().await {
+                if !clips.is_empty() {
+                    let _ = tx.send(Message::RecorderImported(
+                        clips.into_iter().map(|clip| clip.id).collect(),
+                    ));
+                }
+            }
+        });
+    }
+
+    fn recorder_panel(&mut self, ui: &mut Ui) {
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.heading(
+                    RichText::new("Replay recorder")
+                        .family(theme::medium())
+                        .color(theme::TEXT),
+                );
+                ui.label(
+                    RichText::new(
+                        "The libobs helper is launched only when you configure or start capture. The editor stays separate from OBS.",
+                    )
+                    .color(theme::MUTED)
+                    .size(12.0),
+                );
+                ui.add_space(10.0);
+
+                theme::card().show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        let (label, color) = match self.recorder_status.state {
+                            RecorderState::Running => ("Running", theme::OK),
+                            RecorderState::Starting => ("Starting", theme::ACCENT),
+                            RecorderState::Stopping => ("Stopping", theme::ACCENT),
+                            RecorderState::Error => ("Needs attention", theme::DANGER),
+                            RecorderState::Stopped => ("Stopped", theme::MUTED),
+                        };
+                        ui.label(RichText::new(label).family(theme::medium()).color(color));
+                        if self.recorder_status.replay_active {
+                            ui.label(RichText::new("replay buffer active").color(theme::OK));
+                        }
+                        if let Some(rss_bytes) = self.recorder_status.rss_bytes {
+                            ui.label(
+                                RichText::new(format!(
+                                    "helper RSS {}",
+                                    format_file_size(rss_bytes)
+                                ))
+                                .color(theme::MUTED)
+                                .size(12.0),
+                            );
+                        }
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if ui
+                                .add_enabled(!self.busy, egui::Button::new("Refresh"))
+                                .clicked()
+                            {
+                                self.refresh_recorder();
+                            }
+                            if self.recorder_status.replay_active {
+                                if ui
+                                    .add_enabled(!self.busy, egui::Button::new("Save replay"))
+                                    .clicked()
+                                {
+                                    self.save_recorder_replay();
+                                }
+                                if ui
+                                    .add_enabled(!self.busy, egui::Button::new("Stop"))
+                                    .clicked()
+                                {
+                                    self.stop_recorder();
+                                }
+                            } else if ui
+                                .add_enabled(!self.busy, egui::Button::new("Start"))
+                                .clicked()
+                            {
+                                self.start_recorder();
+                            }
+                            if ui
+                                .add_enabled(!self.busy, egui::Button::new("Apply configuration"))
+                                .clicked()
+                            {
+                                self.apply_recorder_config();
+                            }
+                        });
+                    });
+                    if let Some(error) = &self.recorder_status.last_error {
+                        ui.label(RichText::new(error).color(theme::DANGER).size(12.0));
+                    }
+                    if let Some(error) = &self.recorder_status.hotkey_error {
+                        ui.label(
+                            RichText::new(format!("Global hotkey: {error}"))
+                                .color(theme::DANGER)
+                                .size(12.0),
+                        );
+                    } else if self.recorder_status.hotkey_registered {
+                        ui.label(
+                            RichText::new(format!(
+                                "Global save hotkey registered: {}",
+                                self.recorder_config
+                                    .hotkey
+                                    .as_ref()
+                                    .map(ToString::to_string)
+                                    .unwrap_or_else(|| "disabled".into())
+                            ))
+                            .color(theme::OK)
+                            .size(12.0),
+                        );
+                    }
+                });
+
+                ui.add_space(10.0);
+                theme::card().show(ui, |ui| {
+                    ui.label(RichText::new("Capture").family(theme::medium()));
+                    ui.add_space(4.0);
+                    let screens = self.recorder_capabilities.screens.clone();
+                    ui.horizontal(|ui| {
+                        ui.label("Screen");
+                        let selected = screens
+                            .iter()
+                            .find(|screen| screen.id == self.recorder_config.screen_id)
+                            .map(|screen| screen.label.clone())
+                            .unwrap_or_else(|| {
+                                if screens.is_empty() {
+                                    "No screen reported".into()
+                                } else {
+                                    "Choose a screen".into()
+                                }
+                            });
+                        egui::ComboBox::from_id_salt("recorder-screen")
+                            .selected_text(selected)
+                            .show_ui(ui, |ui| {
+                                for screen in &screens {
+                                    ui.selectable_value(
+                                        &mut self.recorder_config.screen_id,
+                                        screen.id.clone(),
+                                        format!(
+                                            "{} ({}×{}{})",
+                                            screen.label,
+                                            screen.width,
+                                            screen.height,
+                                            screen
+                                                .refresh_hz
+                                                .map(|hz| format!(", {:.0} Hz", hz))
+                                                .unwrap_or_default()
+                                        ),
+                                    );
+                                }
+                            });
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Output");
+                        ui.add(
+                            egui::DragValue::new(&mut self.recorder_config.output_width)
+                                .range(320..=16_384)
+                                .prefix("W "),
+                        );
+                        ui.add(
+                            egui::DragValue::new(&mut self.recorder_config.output_height)
+                                .range(180..=16_384)
+                                .prefix("H "),
+                        );
+                    });
+                    let mut fps = self.recorder_config.fps.as_f64();
+                    ui.horizontal(|ui| {
+                        ui.label("Frame rate");
+                        ui.add(
+                            egui::DragValue::new(&mut fps)
+                                .range(1.0..=1_000.0)
+                                .speed(1.0)
+                                .suffix(" fps"),
+                        );
+                        let reported = self
+                            .recorder_capabilities
+                            .frame_rates
+                            .iter()
+                            .map(|range| {
+                                format!("{:.0}–{:.0}", range.min.as_f64(), range.max.as_f64())
+                            })
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        ui.label(
+                            RichText::new(if reported.is_empty() {
+                                "Refresh to discover supported rates".into()
+                            } else {
+                                format!("reported: {reported}")
+                            })
+                            .color(theme::MUTED)
+                            .size(12.0),
+                        );
+                    });
+                    self.recorder_config.fps = rational_from_decimal(fps);
+                    ui.horizontal(|ui| {
+                        ui.label("Replay length");
+                        ui.add(
+                            egui::DragValue::new(&mut self.recorder_config.replay_seconds)
+                                .range(1..=3_600)
+                                .suffix(" seconds"),
+                        );
+                    });
+                });
+
+                ui.add_space(10.0);
+                theme::card().show(ui, |ui| {
+                    ui.label(RichText::new("Encoding").family(theme::medium()));
+                    encoder_combo(
+                        ui,
+                        "Video encoder",
+                        "recorder-video-encoder",
+                        &mut self.recorder_config.video_encoder,
+                        &self.recorder_capabilities.video_encoders,
+                    );
+                    encoder_combo(
+                        ui,
+                        "Audio encoder",
+                        "recorder-audio-encoder",
+                        &mut self.recorder_config.audio_encoder,
+                        &self.recorder_capabilities.audio_encoders,
+                    );
+                    ui.horizontal(|ui| {
+                        ui.label("Video bitrate");
+                        ui.add(
+                            egui::DragValue::new(&mut self.recorder_config.video_bitrate_kbps)
+                                .range(1..=1_000_000)
+                                .suffix(" kbps"),
+                        );
+                        ui.label("Audio");
+                        ui.add(
+                            egui::DragValue::new(&mut self.recorder_config.audio_bitrate_kbps)
+                                .range(1..=10_000)
+                                .suffix(" kbps"),
+                        );
+                    });
+                });
+
+                ui.add_space(10.0);
+                theme::card().show(ui, |ui| {
+                    ui.label(RichText::new("Audio tracks").family(theme::medium()));
+                    let audio_sources = self.recorder_capabilities.audio_sources.clone();
+                    if audio_sources.is_empty() {
+                        ui.label(
+                            RichText::new(
+                                "No audio nodes were reported. Refresh after starting PipeWire/PulseAudio or enabling WASAPI sources.",
+                            )
+                            .color(theme::MUTED)
+                            .size(12.0),
+                        );
+                    }
+                    for source in audio_sources {
+                        let Some(index) = self
+                            .recorder_config
+                            .audio_routes
+                            .iter()
+                            .position(|route| {
+                                route.source_id == source.id
+                                    || (source.id.starts_with("application:")
+                                        && route.source_id == "application:window-title")
+                            })
+                        else {
+                            self.recorder_config.audio_routes.push(AudioRoute {
+                                source_id: source.id.clone(),
+                                track: 1,
+                                enabled: false,
+                            });
+                            continue;
+                        };
+                        let route = &mut self.recorder_config.audio_routes[index];
+                        ui.horizontal(|ui| {
+                            ui.checkbox(&mut route.enabled, "");
+                            if route.source_id.starts_with("application:") {
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut route.source_id)
+                                        .desired_width(180.0)
+                                        .hint_text("application:Discord"),
+                                );
+                            } else {
+                                ui.label(&source.label);
+                            }
+                            ui.add(
+                                egui::DragValue::new(&mut route.track)
+                                    .range(1..=6)
+                                    .prefix("track "),
+                            );
+                            if let Some(detail) = &source.detail {
+                                ui.label(RichText::new(detail).color(theme::MUTED).size(11.0));
+                            }
+                        });
+                    }
+                });
+
+                ui.add_space(10.0);
+                theme::card().show(ui, |ui| {
+                    ui.label(RichText::new("Global replay hotkey").family(theme::medium()));
+                    let mut enabled = self.recorder_config.hotkey.is_some();
+                    if ui
+                        .checkbox(&mut enabled, "Enable while the editor is unfocused")
+                        .changed()
+                    {
+                        self.recorder_config.hotkey = enabled.then_some(Default::default());
+                    }
+                    if let Some(hotkey) = &mut self.recorder_config.hotkey {
+                        ui.horizontal(|ui| {
+                            ui.label("Key");
+                            ui.add(
+                                egui::TextEdit::singleline(&mut hotkey.key)
+                                    .desired_width(90.0)
+                                    .hint_text("F8"),
+                            );
+                            ui.checkbox(&mut hotkey.ctrl, "Ctrl");
+                            ui.checkbox(&mut hotkey.alt, "Alt");
+                            ui.checkbox(&mut hotkey.shift, "Shift");
+                            ui.checkbox(&mut hotkey.meta, "Meta");
+                        });
+                    }
+                    ui.label(
+                        RichText::new(
+                            "Windows and X11 support global registration. Wayland compositors may deny global grabs; the diagnostic above will explain that state.",
+                        )
+                        .color(theme::MUTED)
+                        .size(12.0),
+                    );
+                });
+
+                if !self.recorder_capabilities.diagnostics.is_empty() {
+                    ui.add_space(10.0);
+                    theme::card().show(ui, |ui| {
+                        ui.label(RichText::new("Backend diagnostics").family(theme::medium()));
+                        for diagnostic in &self.recorder_capabilities.diagnostics {
+                            ui.label(RichText::new(diagnostic).color(theme::MUTED).size(12.0));
+                        }
+                        let backend = match self.recorder_capabilities.backend {
+                            CaptureBackend::WindowsGraphicsCapture => "Windows capture",
+                            CaptureBackend::X11 => "X11",
+                            CaptureBackend::PipeWire => "PipeWire / Wayland",
+                            CaptureBackend::Unknown => "Unavailable",
+                        };
+                        ui.label(
+                            RichText::new(format!("Capture backend: {backend}"))
+                                .color(theme::MUTED)
+                                .size(12.0),
+                        );
+                    });
+                }
+            });
+    }
+
     fn status_banner(&mut self, ui: &mut Ui) {
         let tracked_job = match &self.publish_modal {
             Some(PublishModal::Job { id }) => Some(id.as_str()),
@@ -3501,6 +3984,45 @@ fn parse_time(text: &str) -> Option<f64> {
         _ => return None,
     };
     seconds.is_finite().then_some(seconds.max(0.0))
+}
+
+fn encoder_combo(
+    ui: &mut Ui,
+    label: &str,
+    id: &str,
+    selected: &mut String,
+    encoders: &[EncoderCapability],
+) {
+    ui.horizontal(|ui| {
+        ui.label(label);
+        let selected_label = if selected.trim().is_empty() || selected.eq_ignore_ascii_case("auto")
+        {
+            "Automatic".to_string()
+        } else {
+            selected.clone()
+        };
+        egui::ComboBox::from_id_salt(id)
+            .selected_text(selected_label)
+            .show_ui(ui, |ui| {
+                ui.selectable_value(selected, "auto".into(), "Automatic");
+                for encoder in encoders {
+                    ui.selectable_value(
+                        selected,
+                        encoder.id.clone(),
+                        if encoder.hardware {
+                            format!("{} (hardware)", encoder.label)
+                        } else {
+                            encoder.label.clone()
+                        },
+                    );
+                }
+            });
+    });
+}
+
+fn rational_from_decimal(value: f64) -> Rational {
+    let scaled = (value.clamp(1.0, 1_000.0) * 1_000.0).round() as u32;
+    Rational::new(scaled, 1_000)
 }
 
 fn files_being_dropped(ctx: &egui::Context) -> bool {

@@ -64,6 +64,19 @@ Record  →  trim & mix locally  →  publish 1080p  →  send the link
 
 **OBS-aware import.** Grab files with the system picker, or drop them from an inbox under your Videos folder.
 
+**Built-in replay recorder.** Open **Recorder** to select a display, route
+system/application/microphone audio to separate MKV tracks, choose a reported
+frame rate (including 120–240 fps when the capture path supports it), set the
+replay length, and bind a global save hotkey. The libobs helper is a separate
+process and is started lazily, so the editor does not carry OBS's runtime during
+ordinary library work.
+
+Recording memory is measured on the helper rather than capped artificially:
+encoded replay storage is approximately `bitrate × replay seconds ÷ 8`, plus
+OBS and capture overhead. Hardware encoding and shorter buffers keep 1080p120
+and 1440p120 efficient; longer, higher-quality, or software-encoded buffers
+naturally use more memory.
+
 **A library that stays yours.** Clips live in a local library on your PC. Approved teammates also see a shared cloud library of what the group has published.
 
 **Links that expire.** Published clips get a public page with a preview image, then disappear after 30 days. You can extend a clip or revoke access when you need to.

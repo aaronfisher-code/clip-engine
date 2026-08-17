@@ -1,5 +1,6 @@
 use crate::models::{AudioTrack, Clip, PublishJob, Selection};
 use anyhow::Context;
+use clip_engine_recorder_protocol::RecorderConfig;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
@@ -153,6 +154,20 @@ impl Database {
             params![key, value],
         )?;
         Ok(())
+    }
+
+    pub fn recorder_config(&self) -> anyhow::Result<Option<RecorderConfig>> {
+        let Some(value) = self.setting("recorder_config")? else {
+            return Ok(None);
+        };
+        let config =
+            serde_json::from_str(&value).context("The saved recorder configuration is invalid")?;
+        Ok(Some(config))
+    }
+
+    pub fn put_recorder_config(&self, config: &RecorderConfig) -> anyhow::Result<()> {
+        let value = serde_json::to_string(config)?;
+        self.put_setting("recorder_config", &value)
     }
 
     pub fn clips(&self) -> anyhow::Result<Vec<Clip>> {
@@ -366,6 +381,22 @@ mod tests {
             database.setting("source_directory").unwrap().as_deref(),
             Some("/videos/inbox")
         );
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn persists_recorder_configuration_as_json() {
+        let directory =
+            std::env::temp_dir().join(format!("clip-engine-recorder-db-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let database = Database::initialize(directory.join("database.sqlite3"), None).unwrap();
+        let config = RecorderConfig {
+            fps: clip_engine_recorder_protocol::Rational::new(240, 1),
+            replay_seconds: 45,
+            ..RecorderConfig::default()
+        };
+        database.put_recorder_config(&config).unwrap();
+        assert_eq!(database.recorder_config().unwrap(), Some(config));
         std::fs::remove_dir_all(directory).unwrap();
     }
 }

@@ -44,7 +44,7 @@ identifier = "dev.dab.clip-engine"
 publisher = "Dab"
 category = "Video"
 out-dir = "../../dist/desktop"
-before-packaging-command = "cargo build -p clip-engine --release --bin clip-engine"
+before-packaging-command = "cargo build -p clip-engine --release --bin clip-engine && cargo build -p clip-engine-recorder --release --features obs --bin clip-engine-recorder"
 formats = ["deb", "appimage", "nsis"]
 homepage = "https://github.com/aaronfisher-code/clip-engine"
 icons = [
@@ -57,6 +57,8 @@ icons = [
 ]
 resources = [
   { src = "../../resources/binaries", target = "binaries" },
+  { src = "../../target/release/clip-engine-recorder*", target = "binaries" },
+  { src = "../../resources/obs", target = "obs" },
   { src = "../../resources/binaries/*.dll", target = "." },
   { src = "../../resources/binaries/*.so*", target = "." },
   { src = "../../resources/THIRD_PARTY_NOTICES.md", target = "THIRD_PARTY_NOTICES.md" },

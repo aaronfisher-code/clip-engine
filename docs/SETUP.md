@@ -43,6 +43,8 @@ the exact video and thumbnail keys created for one upload.
   without re-encoding video.
 - Runtime detection of NVENC, Intel QSV, AMD AMF, with libx264 fallback.
 - Local 1080p output up to 120 fps and direct multipart R2 upload.
+- A separately packaged libobs replay helper with capability-driven display,
+  audio-track, FPS, and global-hotkey configuration.
 - Local SQLite library plus a shared cloud library for all approved members.
 - Owner approval, password-reset, and member revocation controls.
 - Public Open Graph clip pages with separate video and thumbnail assets.
@@ -61,6 +63,74 @@ npm run dev:desktop
 
 On Linux install `libmpv-dev` (and a working `ffmpeg` on `PATH`). On Windows set
 `MPV_LIB_DIR` to a libmpv import-library directory if pkg-config is unavailable.
+
+The recorder helper is built independently from the editor:
+
+```bash
+LIBOBS_PATH=/usr/lib cargo build -p clip-engine-recorder --features obs
+CLIP_ENGINE_RECORDER=target/debug/clip-engine-recorder \
+  cargo run -p clip-engine
+```
+
+The helper only loads OBS when the Recorder panel is opened or capture is
+started. `cargo run -p clip-engine-recorder --features obs -- --probe` prints
+the detected displays, capture backend, audio nodes, encoders, and supported
+frame-rate range. The probe requires a matching libobs runtime; the pinned
+bindings reject a different OBS API version rather than risking an allocator or
+module-loader crash. Use the bundled runtime in releases or set
+`CLIP_ENGINE_OBS_ROOT` to a directory containing matching `data/` and
+`obs-plugins/` trees. When launching the helper directly on Linux, also
+include that runtime's `lib/` directory in `LD_LIBRARY_PATH`; the desktop
+supervisor sets this path automatically for bundled helpers.
+
+The release probe can also be run through the repository smoke script:
+
+```bash
+CLIP_ENGINE_RECORDER=target/release/clip-engine-recorder \
+CLIP_ENGINE_OBS_ROOT=resources/obs \
+npm run smoke:recorder
+```
+
+On a real graphical session, `node scripts/smoke-recorder.mjs --full` starts a
+one-second replay, waits for the finalized MKV, and verifies its audio streams
+with `ffprobe` when available. It is opt-in because headless CI cannot grant an
+X11 display or a Wayland portal session.
+
+### Recorder platform requirements
+
+- Windows uses OBS monitor capture, WASAPI system/microphone capture, and the
+  WASAPI process-loopback source. Application routes use the source form
+  `application:<window title>`.
+- X11 uses OBS `xshm_input` and PulseAudio-compatible sources.
+- Wayland uses OBS PipeWire plus xdg-desktop-portal for screen selection.
+  Compositors that do not provide a global-hotkey protocol may reject global
+  replay hotkeys; the Recorder panel reports that diagnostic and manual Save
+  replay remains available.
+- Replay files are written as encoded MKV packets in the helper's staging
+  directory, waited until stable, and moved into the library inbox. Raw
+  1080p/1440p frames are not retained by the editor.
+- The helper reports its RSS locally. Expect replay storage to scale roughly
+  with `bitrate × replay seconds ÷ 8`, plus OBS/capture overhead; there is no
+  artificial memory ceiling, so high-bitrate, long, or software-encoded
+  profiles can exceed the 150–300 MB 1080p60 starting estimate.
+
+To prepare a release runtime, provide a published archive URL and its SHA-256:
+
+```bash
+OBS_RUNTIME_URL=https://example.invalid/obs-runtime.tar.xz \
+OBS_RUNTIME_SHA256=<64-hex-digest> \
+node scripts/prepare-libobs-runtime.mjs
+```
+
+Release CI uses platform-specific `OBS_RUNTIME_URL_LINUX` /
+`OBS_RUNTIME_SHA256_LINUX` and `OBS_RUNTIME_URL_WINDOWS` /
+`OBS_RUNTIME_SHA256_WINDOWS` secrets (the legacy unsuffixed names remain a
+fallback). The archive must contain the matching `libobs` libraries, OBS
+plugins, encoders, and `data/` tree for that target.
+
+Do not ship an unverified system runtime in the installer. Include the OBS
+license/source-offer files in `resources/obs` and
+`resources/THIRD_PARTY_NOTICES.md`.
 
 Playback uses libmpv on the original recording: `hwdec=auto-safe`, `hr-seek=yes`,
 coalesced timeline seeks, `aid=` for one selected track, and `lavfi-complex` amix
