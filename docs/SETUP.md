@@ -42,7 +42,8 @@ the exact video and thumbnail keys created for one upload.
   hardware decode when the GPU allows it, frame-accurate trimming, and audio-track mix
   without re-encoding video.
 - Runtime detection of NVENC, Intel QSV, AMD AMF, with libx264 fallback.
-- Local 1080p output up to 120 fps and direct multipart R2 upload.
+- Local output at the display's native resolution and up to 240 fps when the
+  capture path and encoder support it, plus direct multipart R2 upload.
 - A separately packaged libobs replay helper with capability-driven display,
   audio-track, FPS, and global-hotkey configuration.
 - Local SQLite library plus a shared cloud library for all approved members.
@@ -79,9 +80,18 @@ frame-rate range. The probe requires a matching libobs runtime; the pinned
 bindings reject a different OBS API version rather than risking an allocator or
 module-loader crash. Use the bundled runtime in releases or set
 `CLIP_ENGINE_OBS_ROOT` to a directory containing matching `data/` and
-`obs-plugins/` trees. When launching the helper directly on Linux, also
-include that runtime's `lib/` directory in `LD_LIBRARY_PATH`; the desktop
-supervisor sets this path automatically for bundled helpers.
+`obs-plugins/` trees. The runtime must also provide its `obs-ffmpeg-mux`
+executable; the desktop supervisor stages it beside the recorder helper when
+needed. When launching the helper directly on Linux, also include that
+runtime's `lib/` directory in `LD_LIBRARY_PATH`; the desktop supervisor sets
+this path automatically for bundled helpers.
+
+Distribution OBS packages can be newer than the pinned wrapper. For example,
+OBS 32.2.x must not be substituted for the pinned 32.0.4 runtime: libobs can
+abort during startup even when the API major version matches. If the panel
+shows no screens or encoders, run the probe directly and use its diagnostic;
+install or unpack a matching runtime instead of symlinking a newer
+`libobs.so`.
 
 The release probe can also be run through the repository smoke script:
 
@@ -92,20 +102,51 @@ npm run smoke:recorder
 ```
 
 On a real graphical session, `node scripts/smoke-recorder.mjs --full` starts a
-one-second replay, waits for the finalized MKV, and verifies its audio streams
+one-second replay, waits for the finalized replay, and verifies the effective
+encoder, container, codec, dimensions, frame rate, duration, and audio streams
 with `ffprobe` when available. It is opt-in because headless CI cannot grant an
 X11 display or a Wayland portal session.
+
+### Recorder quality modes
+
+The Recorder panel has two encoding modes:
+
+- **Automatic** selects the best available hardware encoder in AV1, HEVC,
+  H.264, then software order. It uses the selected display's native size and
+  refresh rate (capped at 240 fps), prefers quality-based rate control, and
+  falls back to CBR/bitrate when the encoder does not expose a quality
+  property.
+- **Advanced** exposes only the properties reported by the selected libobs
+  encoder. This includes quality/CQP or CQVBR, target and maximum bitrate,
+  keyframe interval, preset, tuning, multipass, profile, look-ahead,
+  adaptive quantization, B-frames, B-frame references, split encode, GPU,
+  rescaling, container, and native custom options. Unsupported fields are
+  omitted and unsupported custom properties are reported as fallbacks.
+
+MKV is the default replay container. It is safer than MP4 if the helper or
+machine stops unexpectedly and keeps each configured audio route on its own
+track. MP4 is available in Advanced mode when a downstream workflow requires
+it. The release runtime includes the pinned libobs libraries and plugins; users
+do not need a separate OBS Studio installation. NVENC, QSV, or AMF still
+requires the corresponding vendor driver and hardware support.
 
 ### Recorder platform requirements
 
 - Windows uses OBS monitor capture, WASAPI system/microphone capture, and the
-  WASAPI process-loopback source. Application routes use the source form
-  `application:<window title>`.
+  WASAPI process-loopback source. Application routes are discovered from
+  visible windows and use an encoded selector that prefers the executable, so
+  changing Spotify/Discord window titles does not break the route.
 - X11 uses OBS `xshm_input` and PulseAudio-compatible sources.
 - Wayland uses OBS PipeWire plus xdg-desktop-portal for screen selection.
-  Compositors that do not provide a global-hotkey protocol may reject global
-  replay hotkeys; the Recorder panel reports that diagnostic and manual Save
-  replay remains available.
+  The optional `linux-pipewire-audio` OBS plugin provides application capture:
+  the helper discovers active PipeWire/PipeWire-Pulse streams and routes each
+  selected executable or application name to its own track. Applications that
+  are not currently playing audio can be entered manually and the plugin will
+  reconnect when they appear. Compositors that do not provide a global-hotkey
+  protocol may reject global replay hotkeys; the Recorder panel reports that
+  diagnostic and manual Save replay remains available.
+- Successful and failed replay saves emit a desktop notification and a short
+  system sound from the helper, so a focused game still gets feedback.
 - Replay files are written as encoded MKV packets in the helper's staging
   directory, waited until stable, and moved into the library inbox. Raw
   1080p/1440p frames are not retained by the editor.
@@ -126,7 +167,22 @@ Release CI uses platform-specific `OBS_RUNTIME_URL_LINUX` /
 `OBS_RUNTIME_SHA256_LINUX` and `OBS_RUNTIME_URL_WINDOWS` /
 `OBS_RUNTIME_SHA256_WINDOWS` secrets (the legacy unsuffixed names remain a
 fallback). The archive must contain the matching `libobs` libraries, OBS
-plugins, encoders, and `data/` tree for that target.
+plugins, encoders, and `data/` tree for that target. For the hardware encoder
+matrix it must include `obs-ffmpeg.so`, `obs-nvenc.so`, and `obs-qsv11.so` on
+Linux, or the corresponding `.dll` files on Windows. `obs-ffmpeg` contains
+Linux VAAPI and Windows AMD AMF support; AMD does not have a separate encoder
+plugin in the current OBS runtime. Linux archives may use the standard OBS
+install layout (`share/obs/` plus `lib/obs-plugins/`) as well as the flattened
+layout. The preparation step supplements a Linux archive missing `obs-nvenc.so`
+or `obs-qsv11.so` from the host OBS plugin package when available, and fails
+when any required encoder module is still missing. The host still provides the
+GPU vendor runtime: NVIDIA's driver, Intel oneVPL/VAAPI runtime, or AMD
+Mesa/libva driver. Linux archives intended to support per-application audio
+should also include
+`obs-plugins/linux-pipewire-audio.so` and its matching
+`data/obs-plugins/linux-pipewire-audio/` locale tree. Without that plugin the
+recorder still provides system and microphone tracks and reports why
+application routes are unavailable.
 
 Do not ship an unverified system runtime in the installer. Include the OBS
 license/source-offer files in `resources/obs` and

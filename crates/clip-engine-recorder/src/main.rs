@@ -1,12 +1,13 @@
 mod backend;
 mod hotkey;
+mod notify;
 
 use anyhow::Context;
 use backend::{create_backend, RecorderBackend};
 use clip_engine_recorder_protocol::{
-    read_frame, write_frame, AudioRoute, ClientMessage, RecorderConfig, RecorderError,
-    RecorderEvent, RecorderRequest, RecorderResponse, RecorderState, ServiceMessage,
-    DEFAULT_SOCKET_NAME, PROTOCOL_VERSION,
+    is_ipc_timeout, read_frame, write_frame, AudioRoute, ClientMessage, RecorderConfig,
+    RecorderError, RecorderEvent, RecorderRequest, RecorderResponse, RecorderState, ServiceMessage,
+    DEFAULT_SOCKET_NAME, IPC_TIMEOUT, PROTOCOL_VERSION,
 };
 use hotkey::HotkeyController;
 use interprocess::local_socket::{
@@ -76,11 +77,11 @@ fn run() -> anyhow::Result<()> {
         println!("{}", run_backend_smoke(backend)?);
         return Ok(());
     }
+    let mut service = RecorderService::new(options.auth_token);
     let listener = ListenerOptions::new()
         .name(name)
         .create_sync()
         .context("create recorder IPC listener")?;
-    let mut service = RecorderService::new(options.auth_token);
 
     eprintln!(
         "clip-engine-recorder listening on {} (libobs={})",
@@ -96,8 +97,10 @@ fn run() -> anyhow::Result<()> {
                 continue;
             }
         };
-        if service.serve(stream).unwrap_or(false) {
-            break;
+        match service.serve(stream) {
+            Ok(true) => break,
+            Ok(false) => {}
+            Err(error) => eprintln!("recorder IPC session ended: {error:#}"),
         }
     }
     Ok(())
@@ -195,6 +198,7 @@ fn run_backend_smoke(mut backend: Box<dyn RecorderBackend>) -> anyhow::Result<se
     backend
         .apply_config(config.clone())
         .context("apply recorder smoke configuration")?;
+    let effective_settings = backend.status().effective_settings.clone();
     backend.start().context("start recorder smoke capture")?;
     thread::sleep(Duration::from_secs(u64::from(config.replay_seconds) + 1));
     let replay = backend
@@ -216,6 +220,7 @@ fn run_backend_smoke(mut backend: Box<dyn RecorderBackend>) -> anyhow::Result<se
         "replayBytes": size,
         "audioRouteCount": config.audio_routes.len(),
         "audioRoutes": config.audio_routes,
+        "effectiveSettings": effective_settings,
     }))
 }
 
@@ -223,6 +228,7 @@ struct RecorderService {
     auth_token: String,
     backend: SharedBackend,
     hotkeys: HotkeyController,
+    notify_on_save: bool,
 }
 
 impl RecorderService {
@@ -233,6 +239,7 @@ impl RecorderService {
             auth_token,
             backend,
             hotkeys,
+            notify_on_save: true,
         }
     }
 
@@ -240,10 +247,13 @@ impl RecorderService {
         verify_same_user(&stream)?;
         let mut authenticated = false;
         stream
-            .set_recv_timeout(Some(std::time::Duration::from_secs(30)))
+            .set_nonblocking(false)
+            .context("set recorder IPC blocking mode")?;
+        stream
+            .set_recv_timeout(Some(IPC_TIMEOUT))
             .context("set recorder IPC receive timeout")?;
         stream
-            .set_send_timeout(Some(std::time::Duration::from_secs(30)))
+            .set_send_timeout(Some(IPC_TIMEOUT))
             .context("set recorder IPC send timeout")?;
 
         loop {
@@ -257,10 +267,8 @@ impl RecorderService {
                 {
                     return Ok(false);
                 }
+                Err(error) if is_ipc_timeout(&error) => continue,
                 Err(error) => {
-                    if error.kind() == ErrorKind::TimedOut {
-                        return Ok(false);
-                    }
                     return Err(error).context("read recorder IPC message");
                 }
             };
@@ -362,7 +370,9 @@ impl RecorderService {
                 false,
             ),
             RecorderRequest::ApplyConfig { config } => {
+                let config = (*config).normalize();
                 let hotkey = config.hotkey.clone();
+                self.notify_on_save = config.notify_on_save;
                 let result = self
                     .backend
                     .lock()
@@ -370,7 +380,7 @@ impl RecorderService {
                     .apply_config(config);
                 let result = result.and_then(|()| {
                     self.hotkeys
-                        .configure(hotkey)
+                        .configure(hotkey, self.notify_on_save)
                         .map_err(|error| anyhow::anyhow!(error))
                 });
                 match result {
@@ -433,22 +443,38 @@ impl RecorderService {
                     backend.save_replay()
                 };
                 match result {
-                    Ok(replay) => (
-                        response(request_id, RecorderResponse::Accepted),
-                        vec![
-                            RecorderEvent::ReplaySaved {
-                                path: replay.path.to_string_lossy().to_string(),
-                                duration_seconds: replay.duration_seconds,
-                            },
-                            RecorderEvent::StatusChanged(self.status()),
-                        ],
-                        false,
-                    ),
-                    Err(error) => (
-                        response_error(request_id, backend_error(error)),
-                        vec![RecorderEvent::StatusChanged(self.status())],
-                        false,
-                    ),
+                    Ok(replay) => {
+                        eprintln!(
+                            "recorder replay saved: {} ({}s)",
+                            replay.path.display(),
+                            replay.duration_seconds
+                        );
+                        if self.notify_on_save {
+                            notify::replay_saved(&replay.path, replay.duration_seconds);
+                        }
+                        (
+                            response(request_id, RecorderResponse::Accepted),
+                            vec![
+                                RecorderEvent::ReplaySaved {
+                                    path: replay.path.to_string_lossy().to_string(),
+                                    duration_seconds: replay.duration_seconds,
+                                },
+                                RecorderEvent::StatusChanged(self.status()),
+                            ],
+                            false,
+                        )
+                    }
+                    Err(error) => {
+                        eprintln!("recorder replay save failed: {error:#}");
+                        if self.notify_on_save {
+                            notify::replay_save_failed(&error);
+                        }
+                        (
+                            response_error(request_id, backend_error(error)),
+                            vec![RecorderEvent::StatusChanged(self.status())],
+                            false,
+                        )
+                    }
                 }
             }
             RecorderRequest::Ping => (

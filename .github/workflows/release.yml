@@ -127,6 +127,43 @@ jobs:
           test -n "${OBS_RUNTIME_URL}" || { echo "A platform-specific OBS_RUNTIME_URL secret is required"; exit 1; }
           [[ "${OBS_RUNTIME_SHA256}" =~ ^[a-fA-F0-9]{64}$ ]] || { echo "A platform-specific OBS_RUNTIME_SHA256 secret is required"; exit 1; }
           node scripts/prepare-libobs-runtime.mjs
+      - name: Bundle Linux PipeWire application audio plugin
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -d resources/obs/lib/obs-plugins ]]; then
+            plugin_dir="resources/obs/lib/obs-plugins"
+            data_dir="resources/obs/share/obs"
+          else
+            plugin_dir="resources/obs/obs-plugins"
+            data_dir="resources/obs/data"
+          fi
+          plugin="${plugin_dir}/linux-pipewire-audio.so"
+          if [[ ! -f "${plugin}" ]]; then
+            source_plugin=""
+            for candidate in \
+              /usr/lib/obs-plugins/linux-pipewire-audio.so \
+              /usr/lib64/obs-plugins/linux-pipewire-audio.so \
+              "/usr/lib/$(dpkg-architecture -qDEB_HOST_MULTIARCH)/obs-plugins/linux-pipewire-audio.so"; do
+              if [[ -f "${candidate}" ]]; then
+                source_plugin="${candidate}"
+                break
+              fi
+            done
+            test -n "${source_plugin}" || {
+              echo "The Linux OBS package did not provide linux-pipewire-audio.so"
+              exit 1
+            }
+            mkdir -p "${plugin_dir}"
+            cp "${source_plugin}" "${plugin}"
+            if [[ -d /usr/share/obs/obs-plugins/linux-pipewire-audio ]]; then
+              mkdir -p "${data_dir}/obs-plugins/linux-pipewire-audio"
+              cp -a /usr/share/obs/obs-plugins/linux-pipewire-audio/. \
+                "${data_dir}/obs-plugins/linux-pipewire-audio/"
+            fi
+          fi
+          test -f "${plugin}"
       - name: Configure Windows libobs import path
         if: runner.os == 'Windows'
         shell: pwsh

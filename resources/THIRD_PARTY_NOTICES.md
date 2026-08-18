@@ -22,3 +22,5 @@ before installation.
 
 The recorder uses [global-hotkey](https://github.com/tauri-apps/global-hotkey)
 under its Apache-2.0/MIT license for Windows and X11 global replay hotkeys.
+Desktop save notifications use [notify-rust](https://github.com/hoodie/notify-rust)
+under its Apache-2.0/MIT license.

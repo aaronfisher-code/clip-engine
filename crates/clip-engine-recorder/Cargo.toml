@@ -18,6 +18,7 @@ display-info = "0.5.9"
 global-hotkey = "0.8.0"
 interprocess = "2.4.3"
 libc = "0.2"
+notify-rust = "4"
 # Cargo ignores semver build metadata; the lockfile pins the published
 # libobs-rs release that targets the 32.0 OBS API.
 libobs-wrapper = { version = "=9.0.4", default-features = false, features = ["enable_runtime"], optional = true }

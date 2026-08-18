@@ -19,15 +19,26 @@ type ConfigureResult = std::result::Result<(), String>;
 enum Command {
     Configure {
         hotkey: Option<Hotkey>,
+        notify_on_save: bool,
         result: Sender<ConfigureResult>,
     },
     Shutdown,
 }
 
-#[derive(Default)]
 struct HotkeyStateSnapshot {
     registered: bool,
     error: Option<String>,
+    notify_on_save: bool,
+}
+
+impl Default for HotkeyStateSnapshot {
+    fn default() -> Self {
+        Self {
+            registered: false,
+            error: None,
+            notify_on_save: true,
+        }
+    }
 }
 
 pub struct HotkeyController {
@@ -52,11 +63,12 @@ impl HotkeyController {
         }
     }
 
-    pub fn configure(&self, hotkey: Option<Hotkey>) -> ConfigureResult {
+    pub fn configure(&self, hotkey: Option<Hotkey>, notify_on_save: bool) -> ConfigureResult {
         let (result_tx, result_rx) = mpsc::channel();
         self.command_tx
             .send(Command::Configure {
                 hotkey,
+                notify_on_save,
                 result: result_tx,
             })
             .map_err(|_| "The recorder hotkey thread stopped.".to_string())?;
@@ -99,7 +111,11 @@ fn run_hotkey_loop(
         }
         while let Ok(command) = command_rx.try_recv() {
             match command {
-                Command::Configure { hotkey, result } => {
+                Command::Configure {
+                    hotkey,
+                    notify_on_save,
+                    result,
+                } => {
                     let outcome = configure_hotkey(
                         manager.as_ref(),
                         &mut active,
@@ -111,6 +127,7 @@ fn run_hotkey_loop(
                         .unwrap_or_else(|poisoned| poisoned.into_inner());
                     snapshot.registered = outcome.is_ok() && active.is_some();
                     snapshot.error = outcome.as_ref().err().cloned();
+                    snapshot.notify_on_save = notify_on_save;
                     let _ = result.send(outcome);
                 }
                 Command::Shutdown => return,
@@ -123,11 +140,33 @@ fn run_hotkey_loop(
                     .as_ref()
                     .is_some_and(|hotkey| hotkey.id() == event.id)
                 {
-                    let mut backend = backend
+                    let notify = state
                         .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner());
-                    if let Err(error) = backend.save_replay() {
-                        eprintln!("recorder hotkey replay save failed: {error:#}");
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .notify_on_save;
+                    let outcome = {
+                        let mut backend = backend
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                        backend.save_replay()
+                    };
+                    match outcome {
+                        Ok(replay) => {
+                            eprintln!(
+                                "recorder hotkey replay saved: {} ({}s)",
+                                replay.path.display(),
+                                replay.duration_seconds
+                            );
+                            if notify {
+                                crate::notify::replay_saved(&replay.path, replay.duration_seconds);
+                            }
+                        }
+                        Err(error) => {
+                            eprintln!("recorder hotkey replay save failed: {error:#}");
+                            if notify {
+                                crate::notify::replay_save_failed(&error);
+                            }
+                        }
                     }
                 }
             }

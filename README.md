@@ -58,18 +58,40 @@ Record  →  trim & mix locally  →  publish 1080p  →  send the link
 
 **Mix audio without cooking the picture.** Enable one track or several. The mix happens in the player; video stays untouched until you export.
 
-**GPU encode when you have it.** NVIDIA NVENC, Intel Quick Sync, and AMD AMF are detected at runtime, with a CPU fallback if needed. Output is 1080p, up to 120 fps.
+**GPU encode when you have it.** NVIDIA NVENC, Intel Quick Sync, and AMD AMF are detected at runtime, with a CPU fallback if needed. Output supports native display rates up to 240 fps when the capture path and encoder allow it.
 
 **Right-click to clip (Windows).** The installer can add a **Create a clip** item to File Explorer. It is a checkbox during setup, so you can leave it off. Choosing it opens that video in Clip Engine.
 
 **OBS-aware import.** Grab files with the system picker, or drop them from an inbox under your Videos folder.
 
 **Built-in replay recorder.** Open **Recorder** to select a display, route
-system/application/microphone audio to separate MKV tracks, choose a reported
+system/microphone and optional per-application audio to separate MKV tracks, choose a reported
 frame rate (including 120–240 fps when the capture path supports it), set the
-replay length, and bind a global save hotkey. The libobs helper is a separate
+replay length, and bind a global save hotkey. Saving a clip shows a desktop
+notification with a short system sound so you can confirm the buffer worked
+while a game is focused; failures (including pressing the key when the buffer
+is not running) notify the same way. **Automatic** mode chooses a
+hardware AV1, HEVC, or H.264 encoder in that order, uses display-native
+resolution and refresh rate up to 240 fps, and applies replay-safe quality
+defaults. **Advanced** mode exposes the controls reported by the active
+encoder — rate control, quality/bitrate, keyframes, preset, tuning, multipass,
+profile, look-ahead, adaptive quantization, B-frames, GPU, rescaling, and
+custom options — without sending unsupported properties. MKV remains the safe
+default because it survives interruptions and preserves separate tracks; MP4
+is available for workflows that require it. The libobs helper is a separate
 process and is started lazily, so the editor does not carry OBS's runtime during
 ordinary library work.
+
+The recorder bundles the matching libobs runtime in release packages. Hardware
+encoders still require the current vendor driver (for example, an NVENC-capable
+NVIDIA driver); installing OBS Studio separately is not required.
+
+On Windows, application routes use WASAPI process loopback and remain tied to
+the selected executable even when a window title changes. On CachyOS/Linux,
+application routes use the `linux-pipewire-audio` OBS plugin and match the
+PipeWire application executable/name; the plugin reconnects when the app starts
+or its audio stream appears. System and microphone capture continue to use the
+default PipeWire/PulseAudio devices.
 
 Recording memory is measured on the helper rather than capped artificially:
 encoded replay storage is approximately `bitrate × replay seconds ÷ 8`, plus

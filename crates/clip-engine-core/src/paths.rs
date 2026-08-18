@@ -103,9 +103,18 @@ impl AppPaths {
     }
 
     pub fn recorder_obs_root(&self) -> Option<PathBuf> {
+        if let Some(root) = std::env::var_os("CLIP_ENGINE_OBS_ROOT") {
+            return Some(PathBuf::from(root));
+        }
         let root = self.resource.join("obs");
-        (root.join("data").is_dir() && root.join("obs-plugins").is_dir()).then_some(root)
+        is_obs_runtime_root(&root).then_some(root)
     }
+}
+
+fn is_obs_runtime_root(root: &Path) -> bool {
+    (root.join("data").is_dir() && root.join("obs-plugins").is_dir())
+        || (root.join("share").join("obs").is_dir()
+            && root.join("lib").join("obs-plugins").is_dir())
 }
 
 pub fn data_dir() -> anyhow::Result<PathBuf> {
@@ -256,6 +265,16 @@ mod tests {
             resource_dir_for_appdir(&root).as_deref(),
             Some(discovered.as_path())
         );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn recorder_runtime_accepts_standard_obs_install_layout() {
+        let root =
+            std::env::temp_dir().join(format!("clip-engine-obs-runtime-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("share").join("obs")).unwrap();
+        std::fs::create_dir_all(root.join("lib").join("obs-plugins")).unwrap();
+        assert!(is_obs_runtime_root(&root));
         std::fs::remove_dir_all(root).unwrap();
     }
 }

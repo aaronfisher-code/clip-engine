@@ -82,6 +82,7 @@ impl RecorderBackend for UnavailableBackend {
     }
 
     fn apply_config(&mut self, config: RecorderConfig) -> anyhow::Result<()> {
+        let config = config.normalize();
         config.validate().map_err(|error| anyhow::anyhow!(error))?;
         self.config = Some(config);
         self.status.configured = true;
@@ -102,6 +103,8 @@ impl RecorderBackend for UnavailableBackend {
     }
 
     fn save_replay(&mut self) -> anyhow::Result<ReplayFile> {
-        anyhow::bail!("The libobs recorder backend is unavailable in this build.")
+        self.status.last_error =
+            Some("The libobs recorder backend is unavailable in this build.".to_string());
+        anyhow::bail!("{}", self.status.last_error.as_deref().unwrap())
     }
 }

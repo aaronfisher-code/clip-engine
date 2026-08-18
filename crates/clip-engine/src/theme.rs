@@ -157,6 +157,27 @@ pub fn inset() -> Frame {
         .inner_margin(Margin::symmetric(10, 8))
 }
 
+pub fn section_title(ui: &mut Ui, title: &str) {
+    ui.label(RichText::new(title).family(medium()).color(TEXT));
+}
+
+pub fn helper_text(ui: &mut Ui, text: &str) {
+    ui.label(RichText::new(text).color(MUTED).size(12.0));
+}
+
+pub fn tab(ui: &mut Ui, selected: bool, label: &str, width: f32) -> bool {
+    let fill = if selected { ACCENT_DIM } else { BG };
+    let stroke = if selected { ACCENT } else { LINE };
+    ui.add_sized(
+        [width, 32.0],
+        egui::Button::new(RichText::new(label).family(medium()).color(TEXT))
+            .fill(fill)
+            .stroke(Stroke::new(1.0, stroke))
+            .corner_radius(CornerRadius::same(4)),
+    )
+    .clicked()
+}
+
 pub fn published_tick_overlay(ui: &Ui, thumb: Rect, count: usize) -> egui::Response {
     let size = 15.0;
     let pad = 3.0;

@@ -43,9 +43,14 @@ impl Engine {
         });
         let cloud = CloudClient::new(api_base)?;
         let encoder = Arc::new(RwLock::new("libx264".to_string()));
-        let recorder_config = database
-            .recorder_config()?
-            .unwrap_or_else(RecorderConfig::default);
+        let recorder_config = match database.recorder_config()? {
+            Some(config) => config.normalize(),
+            None => {
+                let config = RecorderConfig::default();
+                database.put_recorder_config(&config)?;
+                config
+            }
+        };
         let recorder = RecorderSupervisor::new(paths.clone(), recorder_config);
         let engine = Self {
             paths: paths.clone(),
@@ -117,6 +122,14 @@ impl Engine {
     }
 
     pub fn apply_recorder_config(&self, mut config: RecorderConfig) -> anyhow::Result<()> {
+        config = config.normalize();
+        let capabilities = self.recorder.capabilities();
+        let capabilities = if capabilities.video_encoders.is_empty() {
+            self.recorder.refresh()?.0
+        } else {
+            capabilities
+        };
+        config = capabilities.normalize_config(&config);
         config.output_directory = self.paths.recorder_replays.to_string_lossy().to_string();
         self.recorder.apply_config(config.clone())?;
         self.database.put_recorder_config(&config)?;
