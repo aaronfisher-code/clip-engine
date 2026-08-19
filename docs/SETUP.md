@@ -203,22 +203,26 @@ OBS_RUNTIME_SHA256=<64-hex-digest> \
 node scripts/prepare-libobs-runtime.mjs
 ```
 
-Release CI uses platform-specific `OBS_RUNTIME_URL_LINUX` /
-`OBS_RUNTIME_SHA256_LINUX` and `OBS_RUNTIME_URL_WINDOWS` /
-`OBS_RUNTIME_SHA256_WINDOWS` secrets (the legacy unsuffixed names remain a
-fallback). The archive must contain the matching `libobs` libraries, OBS
-plugins, encoders, and `data/` tree for that target. For the hardware encoder
-matrix it must include `obs-ffmpeg.so`, `obs-nvenc.so`, and `obs-qsv11.so` on
-Linux, or the corresponding `.dll` files on Windows. `obs-ffmpeg` contains
-Linux VAAPI and Windows AMD AMF support; AMD does not have a separate encoder
-plugin in the current OBS runtime. Linux archives may use the standard OBS
-install layout (`share/obs/` plus `lib/obs-plugins/`) as well as the flattened
-layout. The preparation step supplements a Linux archive missing `obs-nvenc.so`
-or `obs-qsv11.so` from the host OBS plugin package when available, and fails
-when any required encoder module is still missing. The host still provides the
-GPU vendor runtime: NVIDIA's driver, Intel oneVPL/VAAPI runtime, or AMD
-Mesa/libva driver. Linux archives intended to support per-application audio
-should also include
+Release CI uses the public OBS Studio 32.0.4 Ubuntu `.deb` and Windows x64
+`.zip` assets, with their SHA-256 checksums pinned in
+[`.github/workflows/release.yml`](../.github/workflows/release.yml). No OBS
+runtime URL, checksum, or Windows `LIBOBS_PATH` secrets are required. The
+Linux preparation step extracts the Debian package and the Windows step
+generates the `obs.lib` import library from the verified `obs.dll`.
+
+The archive must contain the matching `libobs` libraries, OBS plugins, encoders,
+and `data/` tree for that target. For the hardware encoder matrix it must
+include `obs-ffmpeg.so`, `obs-nvenc.so`, and `obs-qsv11.so` on Linux, or the
+corresponding `.dll` files on Windows. `obs-ffmpeg` contains Linux VAAPI and
+Windows AMD AMF support; AMD does not have a separate encoder plugin in the
+current OBS runtime. Linux archives may use the standard OBS install layout
+(`share/obs/` plus `lib/obs-plugins/`) as well as the flattened layout. The
+preparation step supplements a Linux archive missing `obs-nvenc.so` or
+`obs-qsv11.so` from the host OBS plugin package when available, and fails when
+any required encoder module is still missing. The host still provides the GPU
+vendor runtime: NVIDIA's driver, Intel oneVPL/VAAPI runtime, or AMD Mesa/libva
+driver. Linux archives intended to support per-application audio should also
+include
 `obs-plugins/linux-pipewire-audio.so` and its matching
 `data/obs-plugins/linux-pipewire-audio/` locale tree. Without that plugin the
 recorder still provides system and microphone tracks and reports why

@@ -92,14 +92,20 @@ jobs:
           - platform: ubuntu-24.04
             formats: deb,appimage
             archive: ffmpeg-master-latest-linux64-gpl.tar.xz
+            obs_runtime_url: https://github.com/obsproject/obs-studio/releases/download/32.0.4/OBS-Studio-32.0.4-Ubuntu-24.04-x86_64.deb
+            obs_runtime_sha256: b146f22a34888bb9854bd7574fc949b00043ba38d222da13f71c180050bf289b
+            obs_runtime_archive: obs-runtime.deb
           - platform: windows-2025
             formats: nsis
             archive: ffmpeg-master-latest-win64-gpl.zip
+            obs_runtime_url: https://github.com/obsproject/obs-studio/releases/download/32.0.4/OBS-Studio-32.0.4-Windows-x64.zip
+            obs_runtime_sha256: fd367a7f156319426f1a600720c1288ad0011da168dff41e0f94dbb18cc1dc0f
+            obs_runtime_archive: obs-runtime.zip
     runs-on: ${{ matrix.platform }}
     env:
-      OBS_RUNTIME_URL: ${{ matrix.platform == 'windows-2025' && (secrets.OBS_RUNTIME_URL_WINDOWS || secrets.OBS_RUNTIME_URL) || (secrets.OBS_RUNTIME_URL_LINUX || secrets.OBS_RUNTIME_URL) }}
-      OBS_RUNTIME_SHA256: ${{ matrix.platform == 'windows-2025' && (secrets.OBS_RUNTIME_SHA256_WINDOWS || secrets.OBS_RUNTIME_SHA256) || (secrets.OBS_RUNTIME_SHA256_LINUX || secrets.OBS_RUNTIME_SHA256) }}
-      OBS_LIBOBS_PATH: ${{ secrets.OBS_LIBOBS_PATH }}
+      OBS_RUNTIME_URL: ${{ matrix.obs_runtime_url }}
+      OBS_RUNTIME_SHA256: ${{ matrix.obs_runtime_sha256 }}
+      OBS_RUNTIME_ARCHIVE: ${{ runner.temp }}/${{ matrix.obs_runtime_archive }}
     steps:
       - name: Keep LF line endings
         run: git config --global core.autocrlf false
@@ -124,8 +130,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test -n "${OBS_RUNTIME_URL}" || { echo "A platform-specific OBS_RUNTIME_URL secret is required"; exit 1; }
-          [[ "${OBS_RUNTIME_SHA256}" =~ ^[a-fA-F0-9]{64}$ ]] || { echo "A platform-specific OBS_RUNTIME_SHA256 secret is required"; exit 1; }
+          test -n "${OBS_RUNTIME_URL}" || { echo "The pinned OBS runtime URL is missing"; exit 1; }
+          [[ "${OBS_RUNTIME_SHA256}" =~ ^[a-fA-F0-9]{64}$ ]] || { echo "The pinned OBS runtime checksum is invalid"; exit 1; }
           node scripts/prepare-libobs-runtime.mjs
       - name: Bundle Linux PipeWire application audio plugin
         if: runner.os == 'Linux'
@@ -164,12 +170,46 @@ jobs:
             fi
           fi
           test -f "${plugin}"
-      - name: Configure Windows libobs import path
+      - name: Set up MSVC tools
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - name: Generate Windows libobs import library
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          if (-not $env:OBS_LIBOBS_PATH) { throw "OBS_LIBOBS_PATH secret is required for the Windows recorder build" }
-          "LIBOBS_PATH=$env:OBS_LIBOBS_PATH" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          $unpacked = Join-Path $env:RUNNER_TEMP "obs-runtime-import"
+          Remove-Item -Recurse -Force $unpacked -ErrorAction SilentlyContinue
+          Expand-Archive -Path $env:OBS_RUNTIME_ARCHIVE -DestinationPath $unpacked
+
+          $obsDll = Get-ChildItem -Path $unpacked -Filter "obs.dll" -File -Recurse | Select-Object -First 1
+          if (-not $obsDll) { throw "The pinned OBS runtime does not contain obs.dll" }
+
+          $exports = @(
+            & dumpbin.exe /exports $obsDll.FullName 2>$null |
+              ForEach-Object {
+                if ($_ -match '^\s+\d+\s+[0-9A-Fa-f]+\s+[0-9A-Fa-f]+\s+(\S+)\s*$') {
+                  $Matches[1]
+                }
+              } |
+              Sort-Object -Unique
+          )
+          if ($exports.Count -eq 0) { throw "Could not read exports from $($obsDll.FullName)" }
+
+          $importDir = Join-Path $env:RUNNER_TEMP "libobs-import"
+          New-Item -ItemType Directory -Force -Path $importDir | Out-Null
+          $defPath = Join-Path $importDir "obs.def"
+          $libPath = Join-Path $importDir "obs.lib"
+          $defLines = @("LIBRARY obs", "EXPORTS") + @(
+            $exports | ForEach-Object { "    $_" }
+          )
+          Set-Content -Path $defPath -Value $defLines -Encoding ascii
+          & lib.exe "/DEF:$defPath" "/MACHINE:X64" "/OUT:$libPath"
+          if ($LASTEXITCODE -ne 0 -or -not (Test-Path $libPath)) {
+            throw "Failed to generate the libobs import library"
+          }
+          "LIBOBS_PATH=$importDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Bundle FFmpeg on Linux
         if: runner.os == 'Linux'
         shell: bash

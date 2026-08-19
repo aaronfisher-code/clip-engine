@@ -42,15 +42,15 @@ await rm(unpacked, { recursive: true, force: true });
 await mkdir(unpacked, { recursive: true });
 extract(archive, unpacked);
 
-const entries = await readdir(unpacked, { withFileTypes: true });
-const source =
-  entries.length === 1 && entries[0].isDirectory()
-    ? join(unpacked, entries[0].name)
-    : unpacked;
-if (!(await isRuntimeRoot(source))) {
+const source = await findRuntimeRoot(unpacked);
+if (!source) {
   throw new Error(
     "OBS runtime must contain either data/ plus obs-plugins/, or the standard share/obs/ plus lib/obs-plugins/ layout",
   );
+}
+await normalizeRuntimeRoot(source);
+if (!(await isRuntimeRoot(source))) {
+  throw new Error("OBS runtime could not be normalized to a supported layout");
 }
 await ensureEncoderPlugins(source);
 await ensureMuxer(source);
@@ -78,6 +78,10 @@ async function sha256File(path) {
 }
 
 function extract(path, output) {
+  if (path.endsWith(".deb")) {
+    execFileSync("dpkg-deb", ["-x", path, output], { stdio: "inherit" });
+    return;
+  }
   if (path.endsWith(".zip")) {
     if (process.platform === "win32") {
       execFileSync("tar", ["-xf", path, "-C", output], { stdio: "inherit" });
@@ -90,12 +94,50 @@ function extract(path, output) {
 }
 
 async function isRuntimeRoot(root) {
+  const hasStandardPlugins = await isDirectory(join(root, "lib", "obs-plugins"));
+  const hasMultiArchPlugins = Boolean(await findMultiArchLibrary(root));
   return (
     ((await isDirectory(join(root, "data"))) &&
       (await isDirectory(join(root, "obs-plugins")))) ||
     ((await isDirectory(join(root, "share", "obs"))) &&
-      (await isDirectory(join(root, "lib", "obs-plugins"))))
+      (hasStandardPlugins || hasMultiArchPlugins))
   );
+}
+
+async function findRuntimeRoot(root) {
+  if (await isRuntimeRoot(root)) return root;
+  for (const entry of await readdir(root, { withFileTypes: true })) {
+    if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
+    const candidate = join(root, entry.name);
+    const source = await findRuntimeRoot(candidate);
+    if (source) return source;
+  }
+  return null;
+}
+
+async function findMultiArchLibrary(root) {
+  const libRoot = join(root, "lib");
+  if (!(await isDirectory(libRoot))) return null;
+  for (const entry of await readdir(libRoot, { withFileTypes: true })) {
+    if (!entry.isDirectory() || !entry.name.endsWith("-linux-gnu")) continue;
+    const candidate = join(libRoot, entry.name);
+    if (await isDirectory(join(candidate, "obs-plugins"))) return candidate;
+  }
+  return null;
+}
+
+async function normalizeRuntimeRoot(root) {
+  const multiArchLibrary = await findMultiArchLibrary(root);
+  if (!multiArchLibrary) return;
+
+  const libRoot = join(root, "lib");
+  for (const entry of await readdir(multiArchLibrary, { withFileTypes: true })) {
+    const source = join(multiArchLibrary, entry.name);
+    const destination = join(libRoot, entry.name);
+    await rm(destination, { recursive: true, force: true });
+    await rename(source, destination);
+  }
+  await rm(multiArchLibrary, { recursive: true, force: true });
 }
 
 async function ensureEncoderPlugins(root) {

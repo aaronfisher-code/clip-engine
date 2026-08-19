@@ -74,9 +74,8 @@ fn apply_platform_hints(notification: &mut notify_rust::Notification, error: boo
 fn play_alert(error: bool) {
     #[cfg(windows)]
     unsafe {
-        use windows_sys::Win32::UI::WindowsAndMessaging::{
-            MessageBeep, MB_ICONASTERISK, MB_ICONHAND,
-        };
+        use windows_sys::Win32::System::Diagnostics::Debug::MessageBeep;
+        use windows_sys::Win32::UI::WindowsAndMessaging::{MB_ICONASTERISK, MB_ICONHAND};
         let kind = if error { MB_ICONHAND } else { MB_ICONASTERISK };
         MessageBeep(kind);
     }
