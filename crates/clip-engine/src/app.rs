@@ -103,6 +103,13 @@ enum TimelineDrag {
     Out,
 }
 
+#[derive(Clone, Copy)]
+struct TimelineDragState {
+    kind: TimelineDrag,
+    time: f64,
+    was_playing: bool,
+}
+
 #[derive(Clone)]
 enum PublishModal {
     Name {
@@ -178,7 +185,8 @@ pub struct ClipApp {
     player_error: Option<String>,
     device_name: String,
     session_media: Option<String>,
-    timeline_drag: Option<TimelineDrag>,
+    timeline_drag: Option<TimelineDragState>,
+    timeline_settling: bool,
     time_edit: Option<TimeEdit>,
     drop_hovering: bool,
     available_update: Option<AvailableUpdate>,
@@ -298,6 +306,7 @@ impl ClipApp {
                     device_name: format!("{} desktop", std::env::consts::OS),
                     session_media: None,
                     timeline_drag: None,
+                    timeline_settling: false,
                     time_edit: None,
                     drop_hovering: false,
                     available_update: None,
@@ -377,6 +386,7 @@ impl ClipApp {
             device_name: format!("{} desktop", std::env::consts::OS),
             session_media: None,
             timeline_drag: None,
+            timeline_settling: false,
             time_edit: None,
             drop_hovering: false,
             available_update: None,
@@ -881,6 +891,7 @@ impl ClipApp {
 
 impl eframe::App for ClipApp {
     fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        self.timeline_settling = false;
         if let Some(window) = frame.winit_window() {
             if self.window.observe(window) {
                 ctx.request_repaint_after(Duration::from_millis(250));
@@ -920,10 +931,10 @@ impl eframe::App for ClipApp {
             ctx.request_repaint_after(Duration::from_millis(80));
         }
         self.stop_at_out_point();
-        if self
-            .player
-            .as_ref()
-            .is_some_and(|player| player.playing() || player.buffering() || player.wants_redraw())
+        if self.timeline_drag.is_none()
+            && self.player.as_ref().is_some_and(|player| {
+                player.playing() || player.buffering() || player.wants_redraw()
+            })
             || matches!(self.export_modal, Some(ExportModal::Working { .. }))
             || matches!(
                 self.update_modal,
@@ -2906,6 +2917,12 @@ impl ClipApp {
             .unwrap_or(0.0)
     }
 
+    fn timeline_time(&self) -> f64 {
+        self.timeline_drag
+            .map(|drag| drag.time)
+            .unwrap_or_else(|| self.playback_time())
+    }
+
     fn activate_player(&mut self, play: bool) {
         let Some(media) = self.session_media.clone() else {
             return;
@@ -3228,7 +3245,7 @@ impl ClipApp {
                 });
         }
 
-        let time = self.playback_time();
+        let time = self.timeline_time();
         if !ctx.egui_wants_keyboard_input() {
             // Read keys first: play/seek can request a repaint, which deadlocks inside `ui.input`.
             let (space, left, right, mark_in, mark_out, shift) = ui.input(|input| {
@@ -3268,7 +3285,7 @@ impl ClipApp {
         let height = ui.available_height();
         ui.set_min_width(width);
         ui.set_min_height(height);
-        let time = self.playback_time();
+        let time = self.timeline_time();
         ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
             ui.set_width(width);
             ui.add_space(14.0);
@@ -3388,22 +3405,27 @@ impl ClipApp {
             .player
             .as_ref()
             .is_some_and(|player| player.buffering());
+        let scrubbing = self.timeline_drag.is_some() || self.timeline_settling;
         if let Some(player) = &mut self.player {
             if loaded {
-                player.pump_events();
-                player.flush_seek();
-                if mix_editor_audio {
-                    let _ = player.apply_audio(
-                        &self
-                            .editor
-                            .as_ref()
-                            .map(|editor| editor.tracks.clone())
-                            .unwrap_or_default(),
-                    );
-                    player.set_mute(self.editor.as_ref().is_some_and(|editor| editor.muted));
+                if scrubbing {
+                    player.paint_frozen(ui, rect.shrink(1.0));
+                } else {
+                    player.pump_events();
+                    player.flush_seek();
+                    if mix_editor_audio {
+                        let _ = player.apply_audio(
+                            &self
+                                .editor
+                                .as_ref()
+                                .map(|editor| editor.tracks.clone())
+                                .unwrap_or_default(),
+                        );
+                        player.set_mute(self.editor.as_ref().is_some_and(|editor| editor.muted));
+                    }
+                    player.start_if_ready();
+                    player.paint(ui, rect.shrink(1.0));
                 }
-                player.start_if_ready();
-                player.paint(ui, rect.shrink(1.0));
             }
         }
         if let Some(player) = &mut self.player {
@@ -3446,7 +3468,7 @@ impl ClipApp {
     }
 
     fn editor_transport(&mut self, ui: &mut Ui, duration: f64, watching: bool) {
-        let time = self.playback_time();
+        let time = self.timeline_time();
         let (display_time, display_duration) = if let Some(editor) = &self.editor {
             let length = (editor.end - editor.start).max(0.0);
             ((time - editor.start).clamp(0.0, length), length)
@@ -3853,6 +3875,7 @@ impl ClipApp {
             Vec2::new(ui.available_width(), height),
             Sense::click_and_drag(),
         );
+        let time = self.timeline_drag.map(|drag| drag.time).unwrap_or(time);
         let track = Rect::from_min_max(
             Pos2::new(rect.left() + 1.0, rect.top() + 16.0),
             Pos2::new(rect.right() - 1.0, rect.bottom() - 16.0),
@@ -3928,7 +3951,7 @@ impl ClipApp {
         let play_x = x_for(time.clamp(0.0, duration));
         theme::paint_playhead(ui.painter(), play_x, track);
 
-        let dragging = self.timeline_drag;
+        let dragging = self.timeline_drag.map(|drag| drag.kind);
         if let Some((start, end)) = selection {
             theme::paint_trim_handle(
                 ui.painter(),
@@ -3962,12 +3985,26 @@ impl ClipApp {
             self.time_edit = None;
             let kind = pointer
                 .and_then(|pos| selection.and_then(|(start, end)| near_handle(pos, start, end)));
-            self.timeline_drag = kind.or(Some(TimelineDrag::Playhead));
+            let kind = kind.unwrap_or(TimelineDrag::Playhead);
+            let was_playing = self
+                .player
+                .as_ref()
+                .is_some_and(|player| player.wants_to_play());
+            self.timeline_drag = Some(TimelineDragState {
+                kind,
+                time,
+                was_playing,
+            });
+            if let Some(player) = &self.player {
+                player.set_scrubbing(true);
+            }
+            self.activate_player(false);
         }
 
         if response.dragged() {
             if let Some(pos) = response.interact_pointer_pos() {
                 self.apply_timeline_drag(time_at(pos.x), duration);
+                ui.ctx().request_repaint();
             }
         } else if response.clicked() {
             if let Some(pos) = response.interact_pointer_pos() {
@@ -3987,32 +4024,48 @@ impl ClipApp {
         }
 
         if response.drag_stopped() {
-            self.timeline_drag = None;
+            self.finish_timeline_drag();
         }
     }
 
     fn apply_timeline_drag(&mut self, time: f64, duration: f64) {
-        match self.timeline_drag.unwrap_or(TimelineDrag::Playhead) {
-            TimelineDrag::In => {
-                let start = self.editor.as_mut().map(|editor| {
-                    editor.start = time.min(editor.end - 0.05).max(0.0);
-                    editor.start
-                });
-                if let Some(start) = start {
-                    self.seek_preview(start);
-                }
-            }
-            TimelineDrag::Out => {
-                let end = self.editor.as_mut().map(|editor| {
-                    editor.end = time.max(editor.start + 0.05).min(duration);
-                    editor.end
-                });
-                if let Some(end) = end {
-                    self.seek_preview(end);
-                }
-            }
-            TimelineDrag::Playhead => {
-                self.seek_preserving_play_state(time);
+        let kind = self
+            .timeline_drag
+            .map(|drag| drag.kind)
+            .unwrap_or(TimelineDrag::Playhead);
+        let target = match kind {
+            TimelineDrag::In => self.editor.as_mut().map(|editor| {
+                editor.start = time.min(editor.end - 0.05).max(0.0);
+                editor.start
+            }),
+            TimelineDrag::Out => self.editor.as_mut().map(|editor| {
+                editor.end = time.max(editor.start + 0.05).min(duration);
+                editor.end
+            }),
+            TimelineDrag::Playhead => Some(time.clamp(0.0, duration)),
+        };
+        let Some(target) = target else {
+            return;
+        };
+        if let Some(drag) = &mut self.timeline_drag {
+            drag.time = target;
+        }
+    }
+
+    fn finish_timeline_drag(&mut self) {
+        let Some(drag) = self.timeline_drag.take() else {
+            return;
+        };
+        self.timeline_settling = true;
+        if let Some(player) = &self.player {
+            player.set_scrubbing(false);
+        }
+        self.activate_player(false);
+        if let Some(player) = &mut self.player {
+            if drag.kind == TimelineDrag::Playhead && drag.was_playing {
+                player.seek_and_play(drag.time);
+            } else {
+                player.seek(drag.time);
             }
         }
     }
