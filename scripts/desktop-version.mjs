@@ -7,6 +7,12 @@ const NPM_MANIFESTS = [
   "cloud/package.json",
   "packages/contracts/package.json",
 ];
+const CARGO_LOCK_PACKAGES = [
+  "clip-engine",
+  "clip-engine-core",
+  "clip-engine-recorder",
+  "clip-engine-recorder-protocol",
+];
 
 function parseVersion(value) {
   const match = String(value ?? "")
@@ -118,8 +124,9 @@ export function setDesktopVersion(version) {
   writeFileSync(CARGO_TOML, updatedCargo);
 
   let lock = readFileSync(CARGO_LOCK, "utf8");
-  lock = replaceLockPackageVersion(lock, "clip-engine", next);
-  lock = replaceLockPackageVersion(lock, "clip-engine-core", next);
+  for (const packageName of CARGO_LOCK_PACKAGES) {
+    lock = replaceLockPackageVersion(lock, packageName, next);
+  }
   writeFileSync(CARGO_LOCK, lock);
 
   for (const manifest of NPM_MANIFESTS) {
