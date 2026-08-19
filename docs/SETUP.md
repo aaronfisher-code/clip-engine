@@ -106,6 +106,8 @@ one-second replay, waits for the finalized replay, and verifies the effective
 encoder, container, codec, dimensions, frame rate, duration, and audio streams
 with `ffprobe` when available. It is opt-in because headless CI cannot grant an
 X11 display or a Wayland portal session.
+Release CI runs the capability probe under a virtual X11 display with Xvfb;
+full capture smoke testing still requires a real graphical session.
 
 ### Recorder quality modes
 
