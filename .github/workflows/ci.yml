@@ -19,10 +19,16 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - name: Linux build dependencies
-        run: sudo apt-get update && sudo apt-get install -y libmpv-dev pkg-config libgtk-3-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libasound2-dev
+        run: sudo apt-get update && sudo apt-get install -y libmpv-dev libobs-dev obs-plugins pkg-config libgtk-3-dev libappindicator3-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libasound2-dev
       - run: npm ci
+      - name: Validate recorder scripts
+        run: node --check scripts/prepare-libobs-runtime.mjs && node --check scripts/probe-recorder.mjs && node --check scripts/smoke-recorder.mjs
       - run: npm run check
       - run: npm test
       - run: npm run format:rust
       - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test -p clip-engine-recorder-protocol -p clip-engine-recorder
+      - run: cargo test -p clip-engine-recorder --features obs
+      - run: cargo check -p clip-engine-recorder --features obs
       - run: cargo build -p clip-engine
+      - run: cargo build -p clip-engine-recorder --features obs

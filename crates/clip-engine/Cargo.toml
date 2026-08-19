@@ -10,6 +10,7 @@ default-run = "clip-engine"
 
 [dependencies]
 anyhow = "1"
+auto-launcher = "1.1.0"
 chrono = { version = "0.4", features = ["serde"] }
 clip-engine-core = { path = "../clip-engine-core" }
 # No accesskit: AT-SPI panics on Linux key events abort the AppImage (panic=abort).
@@ -23,7 +24,9 @@ raw-window-handle = "0.6"
 rfd = "0.17"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+single-instance = "0.3.3"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
+tray-icon = { version = "0.24.2", default-features = false, features = ["gtk"] }
 wgpu = { version = "30", default-features = false, features = ["dx12", "vulkan", "gles", "wgsl"] }
 winit = { version = "0.30", default-features = false, features = ["x11"] }
 
@@ -38,13 +41,16 @@ windows = "0.62"
 [target.'cfg(windows)'.build-dependencies]
 winresource = "0.1"
 
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = "0.18"
+
 [package.metadata.packager]
 product-name = "Dabs Clip Engine"
 identifier = "dev.dab.clip-engine"
 publisher = "Dab"
 category = "Video"
 out-dir = "../../dist/desktop"
-before-packaging-command = "cargo build -p clip-engine --release --bin clip-engine"
+before-packaging-command = "cargo build -p clip-engine --release --bin clip-engine && cargo build -p clip-engine-recorder --release --features obs --bin clip-engine-recorder"
 formats = ["deb", "appimage", "nsis"]
 homepage = "https://github.com/aaronfisher-code/clip-engine"
 icons = [
@@ -57,6 +63,10 @@ icons = [
 ]
 resources = [
   { src = "../../resources/binaries", target = "binaries" },
+  { src = "../../target/release/clip-engine-recorder*", target = "binaries" },
+  { src = "../../resources/obs/bin/obs-ffmpeg-mux*", target = "binaries" },
+  { src = "../../resources/obs/bin/64bit/obs-ffmpeg-mux*", target = "binaries" },
+  { src = "../../resources/obs", target = "obs" },
   { src = "../../resources/binaries/*.dll", target = "." },
   { src = "../../resources/binaries/*.so*", target = "." },
   { src = "../../resources/THIRD_PARTY_NOTICES.md", target = "THIRD_PARTY_NOTICES.md" },
@@ -86,4 +96,4 @@ excluded-libraries = [
 ]
 
 [package.metadata.packager.deb]
-depends = ["libmpv2 | libmpv1"]
+depends = ["libmpv2 | libmpv1", "libappindicator3-1"]

@@ -42,7 +42,10 @@ the exact video and thumbnail keys created for one upload.
   hardware decode when the GPU allows it, frame-accurate trimming, and audio-track mix
   without re-encoding video.
 - Runtime detection of NVENC, Intel QSV, AMD AMF, with libx264 fallback.
-- Local 1080p output up to 120 fps and direct multipart R2 upload.
+- Local output at the display's native resolution and up to 240 fps when the
+  capture path and encoder support it, plus direct multipart R2 upload.
+- A separately packaged libobs replay helper with capability-driven display,
+  audio-track, FPS, and global-hotkey configuration.
 - Local SQLite library plus a shared cloud library for all approved members.
 - Owner approval, password-reset, and member revocation controls.
 - Public Open Graph clip pages with separate video and thumbnail assets.
@@ -61,6 +64,169 @@ npm run dev:desktop
 
 On Linux install `libmpv-dev` (and a working `ffmpeg` on `PATH`). On Windows set
 `MPV_LIB_DIR` to a libmpv import-library directory if pkg-config is unavailable.
+
+The recorder helper is built independently from the editor:
+
+```bash
+LIBOBS_PATH=/usr/lib cargo build -p clip-engine-recorder --features obs
+CLIP_ENGINE_RECORDER=target/debug/clip-engine-recorder \
+  cargo run -p clip-engine
+```
+
+The helper only loads OBS when the Recorder panel is opened or capture is
+started. `cargo run -p clip-engine-recorder --features obs -- --probe` prints
+the detected displays, capture backend, audio nodes, encoders, and supported
+frame-rate range. The probe requires a matching libobs runtime; the pinned
+bindings reject a different OBS API version rather than risking an allocator or
+module-loader crash. Use the bundled runtime in releases or set
+`CLIP_ENGINE_OBS_ROOT` to a directory containing matching `data/` and
+`obs-plugins/` trees. The runtime must also provide its `obs-ffmpeg-mux`
+executable; the desktop supervisor stages it beside the recorder helper when
+needed. When launching the helper directly on Linux, also include that
+runtime's `lib/` directory in `LD_LIBRARY_PATH`; the desktop supervisor sets
+this path automatically for bundled helpers.
+
+Distribution OBS packages can be newer than the pinned wrapper. For example,
+OBS 32.2.x must not be substituted for the pinned 32.0.4 runtime: libobs can
+abort during startup even when the API major version matches. If the panel
+shows no screens or encoders, run the probe directly and use its diagnostic;
+install or unpack a matching runtime instead of symlinking a newer
+`libobs.so`.
+
+The release probe can also be run through the repository smoke script:
+
+```bash
+CLIP_ENGINE_RECORDER=target/release/clip-engine-recorder \
+CLIP_ENGINE_OBS_ROOT=resources/obs \
+npm run smoke:recorder
+```
+
+On a real graphical session, `node scripts/smoke-recorder.mjs --full` starts a
+one-second replay, waits for the finalized replay, and verifies the effective
+encoder, container, codec, dimensions, frame rate, duration, and audio streams
+with `ffprobe` when available. It is opt-in because headless CI cannot grant an
+X11 display or a Wayland portal session.
+
+### Recorder quality modes
+
+The Recorder panel has two encoding modes:
+
+- **Automatic** selects the best available hardware encoder in AV1, HEVC,
+  H.264, then software order. It uses the selected display's native size and
+  refresh rate (capped at 240 fps), prefers quality-based rate control, and
+  falls back to CBR/bitrate when the encoder does not expose a quality
+  property.
+- **Advanced** exposes only the properties reported by the selected libobs
+  encoder. This includes quality/CQP or CQVBR, target and maximum bitrate,
+  keyframe interval, preset, tuning, multipass, profile, look-ahead,
+  adaptive quantization, B-frames, B-frame references, split encode, GPU,
+  rescaling, container, and native custom options. Unsupported fields are
+  omitted and unsupported custom properties are reported as fallbacks.
+
+MKV is the default replay container. It is safer than MP4 if the helper or
+machine stops unexpectedly and keeps each configured audio route on its own
+track with its configured name in stream metadata. MP4 is available in Advanced
+mode when a downstream workflow requires it. The release runtime includes the
+pinned libobs libraries and plugins; users
+do not need a separate OBS Studio installation. NVENC, QSV, or AMF still
+requires the corresponding vendor driver and hardware support.
+
+### Recorder platform requirements
+
+- Windows uses OBS monitor capture, WASAPI system/microphone capture, and the
+  WASAPI process-loopback source. Application routes are discovered from
+  visible windows and use an encoded selector that prefers the executable, so
+  changing Spotify/Discord window titles does not break the route. The system
+  route remains the normal WASAPI output mix, so application tracks can overlap
+  it.
+- Windows also enumerates active Core Audio `eRender` endpoints and exposes
+  optional **Playback-device tracks**. Each route stores the opaque
+  `IMMDevice::GetId()` value rather than a friendly name and passes that exact
+  ID to OBS `wasapi_output_capture` with device timing enabled. Route apps to
+  Voicemeeter buses or Windows per-app output devices, refresh the Recorder
+  capabilities, and add only the endpoints you want on separate tracks. Disable
+  **System audio** when avoiding overlap. These tracks capture endpoint mixes;
+  they do not subtract processes automatically, and a recreated virtual device
+  can leave a saved route unavailable until it is refreshed and added again.
+- X11 uses OBS `xshm_input` and PulseAudio-compatible sources.
+- Wayland uses OBS PipeWire plus xdg-desktop-portal for screen selection.
+  The optional `linux-pipewire-audio` OBS plugin provides application capture
+  on both Linux display backends: the helper discovers active
+  PipeWire/PipeWire-Pulse streams and routes each selected executable or
+  application name to its own track. Applications that are not currently
+  playing audio can be entered manually and the plugin will reconnect when
+  they appear. When the plugin is available, the Audio tab's **Exclude enabled
+  application tracks from System audio** option configures a PipeWire
+  exclusion source, keeping selected application streams out of the system
+  track while retaining other output audio. Compositors that do not provide a
+  global-hotkey protocol may reject global replay hotkeys; the Recorder panel
+  reports that diagnostic and manual Save replay remains available.
+- Successful and failed replay saves emit a desktop notification and a short
+  system sound from the helper, so a focused game still gets feedback.
+- Replay files are written as encoded MKV packets in the helper's staging
+  directory, waited until stable, and moved into the library inbox. Raw
+  1080p/1440p frames are not retained by the editor.
+- The helper reports its RSS locally. Expect replay storage to scale roughly
+  with `bitrate × replay seconds ÷ 8`, plus OBS/capture overhead; there is no
+  artificial memory ceiling, so high-bitrate, long, or software-encoded
+  profiles can exceed the 150–300 MB 1080p60 starting estimate.
+
+### Tray and login startup
+
+The desktop keeps a tray icon alive while the replay helper is running. Closing
+the editor window hides it rather than stopping the helper; use the tray menu's
+Quit action to shut down the application. The Recorder panel has a
+**Launch Clip Engine at login** setting, enabled by default. The generated
+startup entry passes `--background`, which starts the app hidden and starts the
+saved replay configuration. A red dot on the tray icon indicates that the replay
+buffer is currently running.
+
+Windows uses the current user's Run registry entry. Linux uses an XDG Autostart
+desktop entry under `~/.config/autostart` (or `$XDG_CONFIG_HOME/autostart`).
+The tray implementation uses GTK/AppIndicator on Linux, so development and CI
+builds need `libgtk-3-dev` and `libappindicator3-dev`. A desktop environment
+must provide a StatusNotifier/AppIndicator host for the icon to be visible;
+GNOME and some Wayland sessions require an AppIndicator/tray extension. The
+replay helper and global hotkey may still be limited by the compositor.
+Deb packages declare `libappindicator3-1` as the tray runtime dependency;
+AppImages carry the linked runtime libraries.
+
+When launched from an AppImage, the app registers the current `APPIMAGE` path
+when that environment variable is available. Moving the AppImage later can
+require disabling and re-enabling **Launch Clip Engine at login**.
+
+To prepare a release runtime, provide a published archive URL and its SHA-256:
+
+```bash
+OBS_RUNTIME_URL=https://example.invalid/obs-runtime.tar.xz \
+OBS_RUNTIME_SHA256=<64-hex-digest> \
+node scripts/prepare-libobs-runtime.mjs
+```
+
+Release CI uses platform-specific `OBS_RUNTIME_URL_LINUX` /
+`OBS_RUNTIME_SHA256_LINUX` and `OBS_RUNTIME_URL_WINDOWS` /
+`OBS_RUNTIME_SHA256_WINDOWS` secrets (the legacy unsuffixed names remain a
+fallback). The archive must contain the matching `libobs` libraries, OBS
+plugins, encoders, and `data/` tree for that target. For the hardware encoder
+matrix it must include `obs-ffmpeg.so`, `obs-nvenc.so`, and `obs-qsv11.so` on
+Linux, or the corresponding `.dll` files on Windows. `obs-ffmpeg` contains
+Linux VAAPI and Windows AMD AMF support; AMD does not have a separate encoder
+plugin in the current OBS runtime. Linux archives may use the standard OBS
+install layout (`share/obs/` plus `lib/obs-plugins/`) as well as the flattened
+layout. The preparation step supplements a Linux archive missing `obs-nvenc.so`
+or `obs-qsv11.so` from the host OBS plugin package when available, and fails
+when any required encoder module is still missing. The host still provides the
+GPU vendor runtime: NVIDIA's driver, Intel oneVPL/VAAPI runtime, or AMD
+Mesa/libva driver. Linux archives intended to support per-application audio
+should also include
+`obs-plugins/linux-pipewire-audio.so` and its matching
+`data/obs-plugins/linux-pipewire-audio/` locale tree. Without that plugin the
+recorder still provides system and microphone tracks and reports why
+application routes are unavailable.
+
+Do not ship an unverified system runtime in the installer. Include the OBS
+license/source-offer files in `resources/obs` and
+`resources/THIRD_PARTY_NOTICES.md`.
 
 Playback uses libmpv on the original recording: `hwdec=auto-safe`, `hr-seek=yes`,
 coalesced timeline seeks, `aid=` for one selected track, and `lavfi-complex` amix
@@ -255,18 +421,18 @@ it does not yet verify a separate packager signature.
 
 ## Storage and deletion behavior
 
-Local originals are never deleted by Clip Engine. Removing a local clip deletes only
-its preview, exports, and SQLite history. Deleting a published version deletes its R2
-video and thumbnail plus the local export. Extending a clip rewrites its two R2 objects
-and advances its D1 expiry by another 30 days.
+Removing a local clip permanently deletes its original recording from the device,
+along with its preview, exports, and SQLite history. Deleting a published version
+deletes its R2 video and thumbnail plus the local export. Extending a clip rewrites
+its two R2 objects and advances its D1 expiry by another 30 days.
 
 Desktop data is stored in the platform application-data directory:
 
 - Windows: `%LOCALAPPDATA%\dev.dab.clip-engine`
 - Linux: `$XDG_DATA_HOME/dev.dab.clip-engine` or `~/.local/share/dev.dab.clip-engine`
 
-The SQLite database is the only irreplaceable local app file. Originals remain wherever
-the user recorded them. The cloud data plane is small enough that Workers, D1, and R2
+The SQLite database is the only irreplaceable local app file. Published versions are
+managed separately from local originals. The cloud data plane is small enough that Workers, D1, and R2
 are normally simpler and cheaper than exposing a home server; the home server is better
 used for encrypted backups of the repository, signing key, and optional source clips.
 

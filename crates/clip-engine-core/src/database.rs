@@ -1,5 +1,6 @@
 use crate::models::{AudioTrack, Clip, PublishJob, Selection};
 use anyhow::Context;
+use clip_engine_recorder_protocol::RecorderConfig;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
@@ -153,6 +154,25 @@ impl Database {
             params![key, value],
         )?;
         Ok(())
+    }
+
+    pub fn recorder_config(&self) -> anyhow::Result<Option<RecorderConfig>> {
+        let Some(value) = self.setting("recorder_config")? else {
+            return Ok(None);
+        };
+        let config: RecorderConfig =
+            serde_json::from_str(&value).context("The saved recorder configuration is invalid")?;
+        let migrated = config.clone().normalize();
+        if migrated != config {
+            self.put_recorder_config(&migrated)?;
+        }
+        Ok(Some(migrated))
+    }
+
+    pub fn put_recorder_config(&self, config: &RecorderConfig) -> anyhow::Result<()> {
+        let config = config.clone().normalize();
+        let value = serde_json::to_string(&config)?;
+        self.put_setting("recorder_config", &value)
     }
 
     pub fn clips(&self) -> anyhow::Result<Vec<Clip>> {
@@ -366,6 +386,63 @@ mod tests {
             database.setting("source_directory").unwrap().as_deref(),
             Some("/videos/inbox")
         );
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn persists_recorder_configuration_as_json() {
+        let directory =
+            std::env::temp_dir().join(format!("clip-engine-recorder-db-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let database = Database::initialize(directory.join("database.sqlite3"), None).unwrap();
+        let config = RecorderConfig {
+            fps: clip_engine_recorder_protocol::Rational::new(240, 1),
+            replay_seconds: 45,
+            ..RecorderConfig::default()
+        };
+        database.put_recorder_config(&config).unwrap();
+        assert_eq!(database.recorder_config().unwrap(), Some(config));
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn migrates_legacy_recorder_quality_settings_without_overwriting_bitrate() {
+        let directory = std::env::temp_dir().join(format!(
+            "clip-engine-recorder-migrate-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let database = Database::initialize(directory.join("database.sqlite3"), None).unwrap();
+        let legacy = serde_json::json!({
+            "schemaVersion": 1,
+            "screenId": "display-1",
+            "outputWidth": 2560,
+            "outputHeight": 1440,
+            "fps": { "numerator": 144, "denominator": 1 },
+            "replaySeconds": 45,
+            "videoEncoder": "obs_nvenc",
+            "videoBitrateKbps": 75000,
+            "audioEncoder": "ffmpeg_aac",
+            "audioBitrateKbps": 192
+        });
+        database
+            .put_setting("recorder_config", &legacy.to_string())
+            .unwrap();
+
+        let migrated = database.recorder_config().unwrap().unwrap();
+        assert_eq!(migrated.schema_version, 2);
+        assert_eq!(
+            migrated.mode,
+            clip_engine_recorder_protocol::RecorderMode::Advanced
+        );
+        assert_eq!(migrated.video_bitrate_kbps, 75_000);
+        assert_eq!(migrated.audio_bitrate_kbps, 192);
+        assert!(!migrated.match_display);
+        assert!(!migrated.match_display_fps);
+
+        let saved: serde_json::Value =
+            serde_json::from_str(&database.setting("recorder_config").unwrap().unwrap()).unwrap();
+        assert_eq!(saved["schemaVersion"], 2);
         std::fs::remove_dir_all(directory).unwrap();
     }
 }

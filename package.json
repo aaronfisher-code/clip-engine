@@ -14,6 +14,7 @@
     "build:cloud": "npm --workspace @clip-engine/cloud run check",
     "check": "npm --workspace @clip-engine/contracts run check && npm --workspace @clip-engine/cloud run check && cargo check --workspace",
     "check:rust": "cargo check --workspace",
+    "smoke:recorder": "node scripts/smoke-recorder.mjs",
     "test": "npm --workspace @clip-engine/cloud test && cargo test --workspace",
     "test:rust": "cargo test --workspace",
     "format:rust": "cargo fmt --all -- --check",
