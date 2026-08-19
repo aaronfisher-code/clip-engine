@@ -133,6 +133,14 @@ jobs:
           test -n "${OBS_RUNTIME_URL}" || { echo "The pinned OBS runtime URL is missing"; exit 1; }
           [[ "${OBS_RUNTIME_SHA256}" =~ ^[a-fA-F0-9]{64}$ ]] || { echo "The pinned OBS runtime checksum is invalid"; exit 1; }
           node scripts/prepare-libobs-runtime.mjs
+      - name: Use pinned Linux libobs for linking
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f "${GITHUB_WORKSPACE}/resources/obs/lib/libobs.so"
+          echo "LIBOBS_PATH=${GITHUB_WORKSPACE}/resources/obs/lib" >> "${GITHUB_ENV}"
+          echo "LD_LIBRARY_PATH=${GITHUB_WORKSPACE}/resources/obs/lib:${GITHUB_WORKSPACE}/resources/obs/bin/64bit:${LD_LIBRARY_PATH:-}" >> "${GITHUB_ENV}"
       - name: Bundle pinned Linux PipeWire application audio plugin
         if: runner.os == 'Linux'
         shell: bash
@@ -181,19 +189,44 @@ jobs:
           $obsDll = Get-ChildItem -Path $unpacked -Filter "obs.dll" -File -Recurse | Select-Object -First 1
           if (-not $obsDll) { throw "The pinned OBS runtime does not contain obs.dll" }
 
-          $exports = @(
-            & dumpbin.exe /exports $obsDll.FullName 2>$null |
-              ForEach-Object {
-                if ($_ -match '^\s+\d+\s+[0-9A-Fa-f]+\s+[0-9A-Fa-f]+\s+(\S+)\s*$') {
-                  $Matches[1]
-                }
-              } |
-              Sort-Object -Unique
-          )
-          if ($exports.Count -eq 0) { throw "Could not read exports from $($obsDll.FullName)" }
-
           $importDir = Join-Path $env:RUNNER_TEMP "libobs-import"
           New-Item -ItemType Directory -Force -Path $importDir | Out-Null
+          $dumpbinOutput = @(
+            & dumpbin.exe /EXPORTS $obsDll.FullName 2>&1 |
+              ForEach-Object { [string]$_ }
+          )
+          $dumpbinExitCode = $LASTEXITCODE
+          if ($dumpbinExitCode -ne 0) {
+            $dumpbinOutput | ForEach-Object { Write-Host $_ }
+            throw "dumpbin failed with exit code $dumpbinExitCode for $($obsDll.FullName)"
+          }
+
+          $exports = @(
+            $inExports = $false
+            foreach ($line in $dumpbinOutput) {
+              if ($line -match '^\s*ordinal\s+hint\s+RVA\s+name\s*$') {
+                $inExports = $true
+                continue
+              }
+              if ($inExports -and $line -match '^\s*Summary\s*$') {
+                break
+              }
+              if (
+                $inExports -and
+                $line -match '^\s*\d+\s+[0-9A-Fa-f]+\s+[0-9A-Fa-f]+\s+(.+?)\s*$'
+              ) {
+                $name = (($Matches[1] -split '\s+=\s+', 2)[0]).Trim()
+                if ($name -and $name -notmatch '\s') {
+                  $name
+                }
+              }
+            }
+          ) | Sort-Object -Unique
+          if ($exports.Count -eq 0) {
+            $dumpbinOutput | ForEach-Object { Write-Host $_ }
+            throw "Could not read exports from $($obsDll.FullName)"
+          }
+
           $defPath = Join-Path $importDir "obs.def"
           $libPath = Join-Path $importDir "obs.lib"
           $defLines = @("LIBRARY obs", "EXPORTS") + @(

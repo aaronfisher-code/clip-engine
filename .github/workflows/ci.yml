@@ -7,6 +7,10 @@ on:
 jobs:
   validate:
     runs-on: ubuntu-24.04
+    env:
+      OBS_RUNTIME_URL: https://github.com/obsproject/obs-studio/releases/download/32.0.4/OBS-Studio-32.0.4-Ubuntu-24.04-x86_64.deb
+      OBS_RUNTIME_SHA256: b146f22a34888bb9854bd7574fc949b00043ba38d222da13f71c180050bf289b
+      OBS_RUNTIME_ARCHIVE: target/obs-runtime.deb
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -23,6 +27,14 @@ jobs:
       - run: npm ci
       - name: Validate recorder scripts
         run: node --check scripts/prepare-libobs-runtime.mjs && node --check scripts/probe-recorder.mjs && node --check scripts/smoke-recorder.mjs
+      - name: Prepare pinned OBS runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/prepare-libobs-runtime.mjs
+          test -f resources/obs/lib/libobs.so
+          echo "LIBOBS_PATH=${GITHUB_WORKSPACE}/resources/obs/lib" >> "${GITHUB_ENV}"
+          echo "LD_LIBRARY_PATH=${GITHUB_WORKSPACE}/resources/obs/lib:${GITHUB_WORKSPACE}/resources/obs/bin/64bit:${LD_LIBRARY_PATH:-}" >> "${GITHUB_ENV}"
       - run: npm run check
       - run: npm test
       - run: npm run format:rust

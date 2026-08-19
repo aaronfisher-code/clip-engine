@@ -208,7 +208,10 @@ Release CI uses the public OBS Studio 32.0.4 Ubuntu `.deb` and Windows x64
 [`.github/workflows/release.yml`](../.github/workflows/release.yml). No OBS
 runtime URL, checksum, or Windows `LIBOBS_PATH` secrets are required. The
 Linux preparation step extracts the Debian package and the Windows step
-generates the `obs.lib` import library from the verified `obs.dll`.
+generates the `obs.lib` import library from the verified `obs.dll`. Both CI
+workflows link OBS-enabled Rust targets against the prepared runtime through
+`LIBOBS_PATH`; this avoids accidentally linking the runner's older system
+`libobs.so`, which may lack symbols from the pinned API.
 
 The archive must contain the matching `libobs` libraries, OBS plugins, encoders,
 and `data/` tree for that target. The preparation script also fails if the
