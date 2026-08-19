@@ -84,7 +84,23 @@ function extract(path, output) {
   }
   if (path.endsWith(".zip")) {
     if (process.platform === "win32") {
-      execFileSync("tar", ["-xf", path, "-C", output], { stdio: "inherit" });
+      execFileSync(
+        "powershell.exe",
+        [
+          "-NoProfile",
+          "-NonInteractive",
+          "-Command",
+          "Expand-Archive -LiteralPath $env:CLIP_ENGINE_OBS_ARCHIVE -DestinationPath $env:CLIP_ENGINE_OBS_OUTPUT -Force",
+        ],
+        {
+          stdio: "inherit",
+          env: {
+            ...process.env,
+            CLIP_ENGINE_OBS_ARCHIVE: path,
+            CLIP_ENGINE_OBS_OUTPUT: output,
+          },
+        },
+      );
     } else {
       execFileSync("unzip", ["-q", path, "-d", output], { stdio: "inherit" });
     }
