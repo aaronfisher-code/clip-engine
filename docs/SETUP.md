@@ -232,8 +232,8 @@ missing. The host still provides the GPU vendor runtime: NVIDIA's driver,
 Intel oneVPL/VAAPI runtime, or AMD Mesa/libva driver. Linux archives intended
 to support per-application audio should also include
 `obs-plugins/linux-pipewire-audio.so` and its matching
-`data/obs-plugins/linux-pipewire-audio/` locale tree. Release CI downloads and
-verifies version 1.2.1 of the third-party
+`data/obs-plugins/linux-pipewire-audio/locale/` locale tree. Release CI
+downloads and verifies version 1.2.1 of the third-party
 [`obs-pipewire-audio-capture`](https://github.com/dimtpap/obs-pipewire-audio-capture)
 plugin and installs those files into the pinned runtime. Without that optional
 plugin, the recorder still provides system and microphone tracks and reports

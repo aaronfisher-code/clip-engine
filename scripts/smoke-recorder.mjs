@@ -45,11 +45,57 @@ console.log(
 );
 
 function parseJsonOutput(output) {
+  const text = output.trim();
   try {
-    return JSON.parse(output.trim());
+    return JSON.parse(text);
   } catch (error) {
-    throw new Error(`Recorder did not emit valid JSON: ${error.message}`);
+    for (let start = text.indexOf("{"); start >= 0; start = text.indexOf("{", start + 1)) {
+      const end = findJsonObjectEnd(text, start);
+      if (end < 0) continue;
+      try {
+        const payload = JSON.parse(text.slice(start, end + 1));
+        if (
+          payload &&
+          typeof payload === "object" &&
+          typeof payload.backend === "string" &&
+          (Array.isArray(payload.screens) || typeof payload.replayPath === "string")
+        ) {
+          return payload;
+        }
+      } catch {
+        // Continue searching when a log line contains a brace.
+      }
+    }
+    throw new Error(`Recorder did not emit a valid JSON payload: ${error.message}`);
   }
+}
+
+function findJsonObjectEnd(text, start) {
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let index = start; index < text.length; index += 1) {
+    const character = text[index];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (character === "\\") {
+        escaped = true;
+      } else if (character === '"') {
+        inString = false;
+      }
+      continue;
+    }
+    if (character === '"') {
+      inString = true;
+    } else if (character === "{") {
+      depth += 1;
+    } else if (character === "}") {
+      depth -= 1;
+      if (depth === 0) return index;
+    }
+  }
+  return -1;
 }
 
 function verifyCapabilities(capabilities) {
@@ -68,6 +114,15 @@ function verifyCapabilities(capabilities) {
   }
   if (typeof capabilities.backend !== "string") {
     throw new Error("Recorder capabilities are missing a capture backend");
+  }
+  if (capabilities.backend === "unknown") {
+    throw new Error("Recorder did not detect a usable display capture backend");
+  }
+  if (capabilities.videoEncoders.length === 0) {
+    throw new Error("Recorder did not report any video encoders");
+  }
+  if (capabilities.audioEncoders.length === 0) {
+    throw new Error("Recorder did not report any audio encoders");
   }
   if (capabilities.frameRates.some((range) =>
     !range.min || !range.max ||

@@ -143,7 +143,8 @@ jobs:
             libmpv-dev libobs-dev obs-plugins pkg-config libgtk-3-dev \
             libappindicator3-dev libxcb-render0-dev libxcb-shape0-dev \
             libxcb-xfixes0-dev libxkbcommon-dev libasound2-dev patchelf \
-            xz-utils fuse libfuse2 xvfb xauth
+            xz-utils fuse libfuse2 xvfb xauth libsrt1.5-openssl \
+            libmbedtls14t64 libv4l-0
       - run: npm ci
       - run: npm run check
       - name: Prepare pinned OBS runtime
@@ -188,11 +189,11 @@ jobs:
           fi
           plugin="${plugin_dir}/linux-pipewire-audio.so"
           plugin_data="${data_dir}/obs-plugins/linux-pipewire-audio"
-          mkdir -p "${plugin_dir}" "${plugin_data}"
+          mkdir -p "${plugin_dir}" "${plugin_data}/locale"
           install -m 755 "${plugin_source}/bin/64bit/linux-pipewire-audio.so" "${plugin}"
-          cp -a "${plugin_source}/data/locale/." "${plugin_data}/"
+          cp -a "${plugin_source}/data/locale/." "${plugin_data}/locale/"
           test -s "${plugin}"
-          test -d "${plugin_data}"
+          test -f "${plugin_data}/locale/en-US.ini"
       - name: Set up MSVC tools
         if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@v1

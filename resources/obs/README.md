@@ -34,13 +34,14 @@ application runtime.
 
 Linux release runtimes also include the
 `linux-pipewire-audio` plugin under `obs-plugins/` plus its matching locale
-data under `data/obs-plugins/linux-pipewire-audio/`. Release CI downloads and
-checksum-verifies that third-party plugin separately, then installs it into
-the pinned runtime. The helper uses it to link Spotify, Discord, games, and
-other PipeWire application streams to independent OBS tracks and, when
-requested, build a system track that excludes selected application streams.
-System and microphone capture remain available through the native PipeWire or
-PulseAudio modules when the optional application plugin is unavailable.
+data under `data/obs-plugins/linux-pipewire-audio/locale/`. Release CI
+downloads and checksum-verifies that third-party plugin separately, then
+installs it into the pinned runtime. The helper uses it to link Spotify,
+Discord, games, and other PipeWire application streams to independent OBS
+tracks and, when requested, build a system track that excludes selected
+application streams. System and microphone capture remain available through
+the native PipeWire or PulseAudio modules when the optional application plugin
+is unavailable.
 
 Windows playback-device tracks use the standard `wasapi_output_capture` source
 and Core Audio render-endpoint IDs, so no additional OBS plugin is required.
