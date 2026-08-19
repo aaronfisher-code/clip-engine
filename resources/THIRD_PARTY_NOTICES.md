@@ -20,6 +20,11 @@ corresponding OBS license, notices, and source-offer files beside the bundled
 runtime; `scripts/prepare-libobs-runtime.mjs` verifies the runtime archive
 before installation.
 
+Linux release packages also bundle the unmodified
+[linux-pipewire-audio 1.2.1 plugin](https://github.com/dimtpap/obs-pipewire-audio-capture)
+for per-application PipeWire audio capture. It is licensed under GPL-2.0; its
+source and release archive are available from that project.
+
 The recorder uses [global-hotkey](https://github.com/tauri-apps/global-hotkey)
 under its Apache-2.0/MIT license for Windows and X11 global replay hotkeys.
 Desktop save notifications use [notify-rust](https://github.com/hoodie/notify-rust)

@@ -133,11 +133,24 @@ jobs:
           test -n "${OBS_RUNTIME_URL}" || { echo "The pinned OBS runtime URL is missing"; exit 1; }
           [[ "${OBS_RUNTIME_SHA256}" =~ ^[a-fA-F0-9]{64}$ ]] || { echo "The pinned OBS runtime checksum is invalid"; exit 1; }
           node scripts/prepare-libobs-runtime.mjs
-      - name: Bundle optional Linux PipeWire application audio plugin
+      - name: Bundle pinned Linux PipeWire application audio plugin
         if: runner.os == 'Linux'
         shell: bash
         run: |
           set -euo pipefail
+          plugin_url="https://github.com/dimtpap/obs-pipewire-audio-capture/releases/download/1.2.1/linux-pipewire-audio-1.2.1.tar.gz"
+          plugin_sha256="9e2842ea850a61609021e7efeb5af7d95effd30ec1476e4b23d8437485aa8d12"
+          plugin_archive="target/linux-pipewire-audio-1.2.1.tar.gz"
+          plugin_unpack="$(mktemp -d)"
+          trap 'rm -rf "${plugin_unpack}"' EXIT
+
+          curl --fail --location --retry 3 "${plugin_url}" --output "${plugin_archive}"
+          echo "${plugin_sha256}  ${plugin_archive}" | sha256sum --check --strict
+          tar -xzf "${plugin_archive}" -C "${plugin_unpack}"
+          plugin_source="${plugin_unpack}/linux-pipewire-audio"
+          test -f "${plugin_source}/bin/64bit/linux-pipewire-audio.so"
+          test -d "${plugin_source}/data/locale"
+
           if [[ -d resources/obs/lib/obs-plugins ]]; then
             plugin_dir="resources/obs/lib/obs-plugins"
             data_dir="resources/obs/share/obs"
@@ -146,30 +159,12 @@ jobs:
             data_dir="resources/obs/data"
           fi
           plugin="${plugin_dir}/linux-pipewire-audio.so"
-          if [[ ! -f "${plugin}" ]]; then
-            source_plugin=""
-            for candidate in \
-              /usr/lib/obs-plugins/linux-pipewire-audio.so \
-              /usr/lib64/obs-plugins/linux-pipewire-audio.so \
-              "/usr/lib/$(dpkg-architecture -qDEB_HOST_MULTIARCH)/obs-plugins/linux-pipewire-audio.so"; do
-              if [[ -f "${candidate}" ]]; then
-                source_plugin="${candidate}"
-                break
-              fi
-            done
-            if [[ -z "${source_plugin}" ]]; then
-              echo "::notice::linux-pipewire-audio.so is unavailable; continuing without per-application audio"
-              exit 0
-            fi
-            mkdir -p "${plugin_dir}"
-            cp "${source_plugin}" "${plugin}"
-            if [[ -d /usr/share/obs/obs-plugins/linux-pipewire-audio ]]; then
-              mkdir -p "${data_dir}/obs-plugins/linux-pipewire-audio"
-              cp -a /usr/share/obs/obs-plugins/linux-pipewire-audio/. \
-                "${data_dir}/obs-plugins/linux-pipewire-audio/"
-            fi
-          fi
-          test -f "${plugin}"
+          plugin_data="${data_dir}/obs-plugins/linux-pipewire-audio"
+          mkdir -p "${plugin_dir}" "${plugin_data}"
+          install -m 755 "${plugin_source}/bin/64bit/linux-pipewire-audio.so" "${plugin}"
+          cp -a "${plugin_source}/data/locale/." "${plugin_data}/"
+          test -s "${plugin}"
+          test -d "${plugin_data}"
       - name: Set up MSVC tools
         if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@v1

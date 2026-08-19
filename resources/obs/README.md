@@ -2,10 +2,14 @@
 
 Release preparation populates this directory with the pinned libobs runtime,
 OBS data files, capture plugins, encoder plugins, and the `obs-ffmpeg-mux`
-helper. On Linux the runtime must include `obs-ffmpeg.so`, `obs-nvenc.so`, and
-`obs-qsv11.so`; on Windows it must include the corresponding `.dll` files.
-`obs-ffmpeg` provides VAAPI encoders on Linux and AMD AMF encoders on Windows,
-so there is no separate AMD encoder module to bundle. Use
+helper. The preparation script verifies the platform capture modules before
+installing the runtime. Linux requires `linux-capture.so`,
+`linux-pipewire.so`, and `linux-pulseaudio.so`; Windows requires
+`win-capture.dll` and `win-wasapi.dll`. Both platforms require
+`obs-ffmpeg`, `obs-nvenc`, and `obs-qsv11` for the supported encoder matrix.
+`obs-ffmpeg` also provides the replay-buffer output and audio encoders, as well
+as VAAPI encoders on Linux and AMD AMF encoders on Windows, so there is no
+separate AMD encoder module to bundle. Use
 `scripts/prepare-libobs-runtime.mjs` with a checksum-verified archive before
 creating an installer; the repository intentionally does not commit platform
 runtime binaries.
@@ -28,13 +32,15 @@ modules. The host still supplies the matching NVIDIA driver, Intel oneVPL/VAAPI
 runtime, or AMD Mesa/libva driver; those GPU drivers must not be copied into the
 application runtime.
 
-Linux runtimes that advertise per-application audio must include the
+Linux release runtimes also include the
 `linux-pipewire-audio` plugin under `obs-plugins/` plus its matching locale
-data under `data/obs-plugins/linux-pipewire-audio/`. The helper uses that
-plugin to link Spotify, Discord, games, and other PipeWire application streams
-to independent OBS tracks and, when requested, build a system track that
-excludes selected application streams; system and microphone capture do not
-depend on it.
+data under `data/obs-plugins/linux-pipewire-audio/`. Release CI downloads and
+checksum-verifies that third-party plugin separately, then installs it into
+the pinned runtime. The helper uses it to link Spotify, Discord, games, and
+other PipeWire application streams to independent OBS tracks and, when
+requested, build a system track that excludes selected application streams.
+System and microphone capture remain available through the native PipeWire or
+PulseAudio modules when the optional application plugin is unavailable.
 
 Windows playback-device tracks use the standard `wasapi_output_capture` source
 and Core Audio render-endpoint IDs, so no additional OBS plugin is required.

@@ -52,6 +52,7 @@ await normalizeRuntimeRoot(source);
 if (!(await isRuntimeRoot(source))) {
   throw new Error("OBS runtime could not be normalized to a supported layout");
 }
+await ensureCapturePlugins(source);
 await ensureEncoderPlugins(source);
 await ensureMuxer(source);
 await rm(destination, { recursive: true, force: true });
@@ -185,6 +186,45 @@ async function ensureEncoderPlugins(root) {
         "AMD AMF on Windows and AMD/Intel VAAPI on Linux are provided by obs-ffmpeg.",
     );
   }
+}
+
+async function ensureCapturePlugins(root) {
+  const missing = [];
+  for (const requirement of requiredCapturePlugins()) {
+    if (!(await findFile(root, requirement.fileName))) {
+      missing.push(`${requirement.fileName} (${requirement.purpose})`);
+    }
+  }
+
+  if (missing.length > 0) {
+    throw new Error(
+      `OBS runtime is missing required capture plugins: ${missing.join(", ")}. ` +
+        "The bundled recorder requires the platform display and audio capture modules.",
+    );
+  }
+}
+
+function requiredCapturePlugins() {
+  if (process.platform === "linux") {
+    return [
+      { fileName: "linux-capture.so", purpose: "X11 display capture" },
+      { fileName: "linux-pipewire.so", purpose: "Wayland display capture" },
+      {
+        fileName: "linux-pulseaudio.so",
+        purpose: "PulseAudio system and microphone fallback",
+      },
+    ];
+  }
+  if (process.platform === "win32") {
+    return [
+      { fileName: "win-capture.dll", purpose: "Windows display capture" },
+      {
+        fileName: "win-wasapi.dll",
+        purpose: "WASAPI system, microphone, and application audio",
+      },
+    ];
+  }
+  return [];
 }
 
 async function ensureMuxer(root) {
