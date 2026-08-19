@@ -97,8 +97,8 @@ jobs:
             archive: ffmpeg-master-latest-win64-gpl.zip
     runs-on: ${{ matrix.platform }}
     env:
-      OBS_RUNTIME_URL: ${{ runner.os == 'Windows' && (secrets.OBS_RUNTIME_URL_WINDOWS || secrets.OBS_RUNTIME_URL) || (secrets.OBS_RUNTIME_URL_LINUX || secrets.OBS_RUNTIME_URL) }}
-      OBS_RUNTIME_SHA256: ${{ runner.os == 'Windows' && (secrets.OBS_RUNTIME_SHA256_WINDOWS || secrets.OBS_RUNTIME_SHA256) || (secrets.OBS_RUNTIME_SHA256_LINUX || secrets.OBS_RUNTIME_SHA256) }}
+      OBS_RUNTIME_URL: ${{ matrix.platform == 'windows-2025' && (secrets.OBS_RUNTIME_URL_WINDOWS || secrets.OBS_RUNTIME_URL) || (secrets.OBS_RUNTIME_URL_LINUX || secrets.OBS_RUNTIME_URL) }}
+      OBS_RUNTIME_SHA256: ${{ matrix.platform == 'windows-2025' && (secrets.OBS_RUNTIME_SHA256_WINDOWS || secrets.OBS_RUNTIME_SHA256) || (secrets.OBS_RUNTIME_SHA256_LINUX || secrets.OBS_RUNTIME_SHA256) }}
       OBS_LIBOBS_PATH: ${{ secrets.OBS_LIBOBS_PATH }}
     steps:
       - name: Keep LF line endings
