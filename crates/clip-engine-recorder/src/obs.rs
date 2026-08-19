@@ -2139,14 +2139,14 @@ fn property_string(
 fn enumerate_windows() -> Vec<(String, String, u32, String)> {
     use std::ffi::c_void;
     use windows_sys::Win32::{
-        Foundation::CloseHandle,
+        Foundation::{CloseHandle, HWND},
         System::{
             ProcessStatus::GetProcessImageFileNameW,
             Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION},
         },
         UI::WindowsAndMessaging::{
             EnumWindows, GetClassNameW, GetWindowTextLengthW, GetWindowTextW,
-            GetWindowThreadProcessId, IsWindowVisible, HWND,
+            GetWindowThreadProcessId, IsWindowVisible,
         },
     };
 
