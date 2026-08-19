@@ -13,6 +13,8 @@ separate AMD encoder module to bundle. Use
 `scripts/prepare-libobs-runtime.mjs` with a checksum-verified archive before
 creating an installer; the repository intentionally does not commit platform
 runtime binaries.
+The Linux preparation step removes the OBS desktop executable because the
+recorder uses libobs directly and does not need the Qt-based OBS frontend.
 
 The desktop application launches its bundled recorder helper with this runtime;
 end users do not need to install OBS Studio separately. Hardware encoder

@@ -52,6 +52,7 @@ await normalizeRuntimeRoot(source);
 if (!(await isRuntimeRoot(source))) {
   throw new Error("OBS runtime could not be normalized to a supported layout");
 }
+await pruneDesktopExecutable(source);
 await ensureCapturePlugins(source);
 await ensureEncoderPlugins(source);
 await ensureMuxer(source);
@@ -155,6 +156,12 @@ async function normalizeRuntimeRoot(root) {
     await rename(source, destination);
   }
   await rm(multiArchLibrary, { recursive: true, force: true });
+}
+
+async function pruneDesktopExecutable(root) {
+  if (process.platform !== "linux") return;
+  await rm(join(root, "bin", "obs"), { force: true });
+  await rm(join(root, "obs"), { force: true });
 }
 
 async function ensureEncoderPlugins(root) {
