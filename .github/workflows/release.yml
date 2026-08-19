@@ -105,7 +105,7 @@ jobs:
     env:
       OBS_RUNTIME_URL: ${{ matrix.obs_runtime_url }}
       OBS_RUNTIME_SHA256: ${{ matrix.obs_runtime_sha256 }}
-      OBS_RUNTIME_ARCHIVE: ${{ runner.temp }}/${{ matrix.obs_runtime_archive }}
+      OBS_RUNTIME_ARCHIVE: target/${{ matrix.obs_runtime_archive }}
     steps:
       - name: Keep LF line endings
         run: git config --global core.autocrlf false
