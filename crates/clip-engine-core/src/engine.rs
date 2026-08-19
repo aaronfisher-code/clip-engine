@@ -334,6 +334,10 @@ impl Engine {
             anyhow::bail!("Wait for active work to finish before deleting this clip.");
         }
         let mut removed = 0;
+        let source = Path::new(&clip.source_path);
+        if remove_source_recording(source).await? {
+            removed += 1;
+        }
         if let Some(preview) = clip.preview_path {
             if Path::new(&preview).starts_with(&self.paths.previews)
                 && tokio::fs::remove_file(preview).await.is_ok()
@@ -613,6 +617,16 @@ fn supported(path: &Path) -> bool {
         })
 }
 
+async fn remove_source_recording(path: &Path) -> anyhow::Result<bool> {
+    match tokio::fs::remove_file(path).await {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => {
+            Err(error).with_context(|| format!("delete original recording {}", path.display()))
+        }
+    }
+}
+
 async fn run_publish(engine: Engine, clip: Clip, mut job: PublishJob, title: String) {
     let result: anyhow::Result<()> = async {
         let selection = job
@@ -718,5 +732,27 @@ async fn run_publish(engine: Engine, clip: Clip, mut job: PublishJob, title: Str
         job.status = "failed".into();
         job.error = Some(format!("{error:#}"));
         let _ = engine.database.put_job(&job);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::remove_source_recording;
+
+    #[tokio::test]
+    async fn removes_source_recording_and_accepts_missing_file() {
+        let directory = std::env::temp_dir().join(format!(
+            "clip-engine-delete-source-{}",
+            uuid::Uuid::new_v4()
+        ));
+        tokio::fs::create_dir_all(&directory).await.unwrap();
+        let path = directory.join("capture.mkv");
+        tokio::fs::write(&path, b"video").await.unwrap();
+
+        assert!(remove_source_recording(&path).await.unwrap());
+        assert!(!path.exists());
+        assert!(!remove_source_recording(&path).await.unwrap());
+
+        tokio::fs::remove_dir_all(directory).await.unwrap();
     }
 }

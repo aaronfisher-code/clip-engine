@@ -71,6 +71,7 @@ struct MpvEventEndFile {
 
 const MPV_EVENT_NONE: i32 = 0;
 const MPV_EVENT_END_FILE: i32 = 7;
+const MPV_EVENT_FILE_LOADED: i32 = 8;
 const MPV_EVENT_PLAYBACK_RESTART: i32 = 21;
 const MPV_END_FILE_REASON_ERROR: i32 = 4;
 
@@ -84,7 +85,11 @@ unsafe extern "C" {
         name: *const c_char,
         data: *const c_char,
     ) -> c_int;
-    fn mpv_command(ctx: *mut MpvHandle, args: *mut *const c_char) -> c_int;
+    fn mpv_command_async(
+        ctx: *mut MpvHandle,
+        reply_userdata: u64,
+        args: *mut *const c_char,
+    ) -> c_int;
     fn mpv_set_property_string(
         ctx: *mut MpvHandle,
         name: *const c_char,
@@ -156,6 +161,7 @@ struct RenderShared {
     seek_restarted: AtomicBool,
     resume_after_seek: AtomicBool,
     pending_play: AtomicBool,
+    file_loaded: AtomicBool,
 }
 
 enum VideoBackend {
@@ -262,6 +268,7 @@ impl Player {
                 seek_restarted: AtomicBool::new(false),
                 resume_after_seek: AtomicBool::new(false),
                 pending_play: AtomicBool::new(false),
+                file_loaded: AtomicBool::new(false),
             });
             let callback = matches!(backend, VideoBackend::OpenGl).then(|| {
                 let paint_shared = shared.clone();
@@ -388,21 +395,12 @@ impl Player {
         if self.loaded_path.as_deref() == Some(path) {
             return Ok(());
         }
-        if !is_remote_media(path) {
-            let source = std::path::Path::new(path);
-            if !source.is_file() {
-                anyhow::bail!("This recording is no longer on disk:\n{path}");
-            }
-            if source.metadata().map(|meta| meta.len()).unwrap_or(0) == 0 {
-                anyhow::bail!("This recording is empty and cannot be played:\n{path}");
-            }
-        }
         let _ = set_property(self.handle, "pause", "yes");
         let _ = set_property(self.handle, "lavfi-complex", "");
         let _ = set_property(self.handle, "aid", "auto");
         let _ = set_property(self.handle, "mute", "no");
         let _ = set_property(self.handle, "volume", "100");
-        command(self.handle, &["loadfile", path, "replace"])?;
+        command_async(self.handle, &["loadfile", path, "replace"])?;
         self.loaded_path = Some(path.to_string());
         self.audio_signature = None;
         self.pending_seek = None;
@@ -411,6 +409,7 @@ impl Player {
         self.error = None;
         self.load_started = Some(Instant::now());
         self.shared.pending_play.store(false, Ordering::Relaxed);
+        self.shared.file_loaded.store(false, Ordering::Relaxed);
         self.shared.awaiting_frame.store(true, Ordering::SeqCst);
         self.shared
             .awaiting_seek_frame
@@ -448,13 +447,14 @@ impl Player {
             .resume_after_seek
             .store(false, Ordering::Relaxed);
         self.shared.pending_play.store(false, Ordering::Relaxed);
+        self.shared.file_loaded.store(false, Ordering::Relaxed);
         self.shared.awaiting_frame.store(false, Ordering::SeqCst);
         self.shared
             .awaiting_seek_frame
             .store(false, Ordering::Relaxed);
         self.shared.seek_restarted.store(false, Ordering::Relaxed);
         let _ = set_property(self.handle, "pause", "yes");
-        let _ = command(self.handle, &["stop"]);
+        let _ = command_async(self.handle, &["stop"]);
         self.loaded_path = None;
         self.audio_signature = None;
         self.pending_seek = None;
@@ -478,8 +478,8 @@ impl Player {
     }
 
     pub fn play(&self) {
-        if self.shared.awaiting_frame.load(Ordering::Relaxed) {
-            self.shared.pending_play.store(true, Ordering::Relaxed);
+        self.shared.pending_play.store(true, Ordering::Relaxed);
+        if !self.shared.file_loaded.load(Ordering::Relaxed) {
             return;
         }
         self.shared.pending_play.store(false, Ordering::Relaxed);
@@ -502,13 +502,13 @@ impl Player {
     }
 
     pub fn start_if_ready(&mut self) {
-        if self.shared.awaiting_frame.load(Ordering::Relaxed) {
-            return;
-        }
         if !self.shared.pending_play.load(Ordering::Relaxed) {
             return;
         }
-        if self.pending_seek.is_some() || self.seek_in_flight {
+        if !self.shared.file_loaded.load(Ordering::Relaxed)
+            || self.pending_seek.is_some()
+            || self.seek_in_flight
+        {
             return;
         }
         self.shared.pending_play.store(false, Ordering::Relaxed);
@@ -586,7 +586,6 @@ impl Player {
     }
 
     pub fn pump_events(&mut self) {
-        self.check_load_timeout();
         unsafe {
             loop {
                 let event = mpv_wait_event(self.handle, 0.0);
@@ -594,6 +593,14 @@ impl Player {
                     break;
                 }
                 match (*event).event_id {
+                    MPV_EVENT_FILE_LOADED => {
+                        self.shared.file_loaded.store(true, Ordering::Relaxed);
+                        self.load_started = Some(Instant::now());
+                        if self.shared.pending_play.swap(false, Ordering::Relaxed) {
+                            self.set_playback_sync(true);
+                            let _ = set_property(self.handle, "pause", "no");
+                        }
+                    }
                     MPV_EVENT_END_FILE => {
                         let data = (*event).data as *const MpvEventEndFile;
                         if !data.is_null() && (*data).reason == MPV_END_FILE_REASON_ERROR {
@@ -611,6 +618,7 @@ impl Player {
                                 .store(false, Ordering::Relaxed);
                             self.shared.seek_restarted.store(false, Ordering::Relaxed);
                             self.shared.pending_play.store(false, Ordering::Relaxed);
+                            self.shared.file_loaded.store(false, Ordering::Relaxed);
                             self.seek_in_flight = false;
                             self.load_started = None;
                         }
@@ -624,10 +632,14 @@ impl Player {
                 self.request_redraw();
             }
         }
+        self.check_load_timeout();
     }
 
     fn check_load_timeout(&mut self) {
         if !self.shared.awaiting_frame.load(Ordering::Relaxed) {
+            return;
+        }
+        if !self.shared.pending_play.load(Ordering::Relaxed) && !self.playing() {
             return;
         }
         let Some(started) = self.load_started else {
@@ -673,7 +685,7 @@ impl Player {
             return;
         }
         let issued = if playing {
-            command(
+            command_async(
                 self.handle,
                 &["seek", &format!("{time:.6}"), "absolute+exact"],
             )
@@ -681,7 +693,7 @@ impl Player {
         } else {
             self.set_playback_sync(false);
             set_property_f64(self.handle, "time-pos", time).is_ok()
-                || command(
+                || command_async(
                     self.handle,
                     &["seek", &format!("{time:.6}"), "absolute+exact"],
                 )
@@ -1084,10 +1096,6 @@ fn paint_video(
     }
 }
 
-fn is_remote_media(path: &str) -> bool {
-    path.starts_with("http://") || path.starts_with("https://")
-}
-
 fn set_option(handle: *mut MpvHandle, name: &str, value: &str) -> anyhow::Result<()> {
     let name = CString::new(name)?;
     let value = CString::new(value)?;
@@ -1119,7 +1127,7 @@ fn set_property_f64(handle: *mut MpvHandle, name: &str, value: f64) -> anyhow::R
     }
 }
 
-fn command(handle: *mut MpvHandle, args: &[&str]) -> anyhow::Result<()> {
+fn command_async(handle: *mut MpvHandle, args: &[&str]) -> anyhow::Result<()> {
     let owned = args
         .iter()
         .map(|value| CString::new(*value))
@@ -1129,7 +1137,7 @@ fn command(handle: *mut MpvHandle, args: &[&str]) -> anyhow::Result<()> {
         .map(|value| value.as_ptr())
         .chain(std::iter::once(ptr::null()))
         .collect::<Vec<_>>();
-    unsafe { check(mpv_command(handle, pointers.as_mut_ptr())) }
+    unsafe { check(mpv_command_async(handle, 0, pointers.as_mut_ptr())) }
 }
 
 fn number(handle: *mut MpvHandle, name: &str) -> Option<f64> {

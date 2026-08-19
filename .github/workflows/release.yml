@@ -117,7 +117,7 @@ jobs:
         run: node scripts/desktop-version.mjs set ${{ needs.prepare.outputs.version }}
       - name: Linux build dependencies
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libmpv-dev libobs-dev obs-plugins pkg-config libgtk-3-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libasound2-dev patchelf xz-utils fuse libfuse2
+        run: sudo apt-get update && sudo apt-get install -y libmpv-dev libobs-dev obs-plugins pkg-config libgtk-3-dev libappindicator3-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libasound2-dev patchelf xz-utils fuse libfuse2
       - run: npm ci
       - run: npm run check
       - name: Prepare pinned OBS runtime
@@ -221,6 +221,11 @@ jobs:
         run: |
           cargo build -p clip-engine-recorder --release --features obs --bin clip-engine-recorder
           cargo build -p clip-engine --release --bin clip-engine
+      - name: Test Windows recorder and endpoint discovery
+        if: runner.os == 'Windows'
+        run: |
+          cargo test -p clip-engine-recorder-protocol
+          cargo test -p clip-engine-recorder --features obs
       - name: Confirm release binary
         shell: bash
         env:

@@ -7,7 +7,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-pub const PROTOCOL_VERSION: u16 = 2;
+pub const PROTOCOL_VERSION: u16 = 4;
 pub const RECORDER_CONFIG_SCHEMA_VERSION: u16 = 2;
 pub const DEFAULT_SOCKET_NAME: &str = "clip-engine-recorder";
 pub const MAX_FRAME_BYTES: u32 = 8 * 1024 * 1024;
@@ -128,9 +128,18 @@ pub enum CaptureBackend {
 pub enum AudioSourceKind {
     System,
     Application,
+    PlaybackDevice,
     Microphone,
     #[default]
     Unknown,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum SystemAudioMode {
+    #[default]
+    Mixed,
+    ExcludeApplications,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -261,6 +270,8 @@ pub struct EncoderCapability {
 pub struct AudioRoute {
     pub source_id: String,
     pub track: u8,
+    #[serde(default)]
+    pub track_name: String,
     #[serde(default = "default_true")]
     pub enabled: bool,
 }
@@ -332,6 +343,8 @@ pub struct RecorderConfig {
     pub audio_encoder: String,
     #[serde(default = "default_audio_bitrate")]
     pub audio_bitrate_kbps: u32,
+    #[serde(default)]
+    pub system_audio_mode: SystemAudioMode,
     #[serde(default)]
     pub audio_routes: Vec<AudioRoute>,
     #[serde(default)]
@@ -444,6 +457,7 @@ impl Default for RecorderConfig {
             custom_encoder_options: String::new(),
             audio_encoder: default_audio_encoder(),
             audio_bitrate_kbps: default_audio_bitrate(),
+            system_audio_mode: SystemAudioMode::default(),
             audio_routes: Vec::new(),
             hotkey: Some(Hotkey::default()),
             notify_on_save: true,
@@ -544,6 +558,14 @@ impl RecorderConfig {
             {
                 return Err("Application audio routes must identify an application.".into());
             }
+            if route.enabled
+                && route
+                    .source_id
+                    .strip_prefix("playback:")
+                    .is_some_and(|target| target.trim().is_empty())
+            {
+                return Err("Playback-device audio routes must identify a device.".into());
+            }
             if !(1..=6).contains(&route.track) {
                 return Err("OBS supports audio tracks 1 through 6.".into());
             }
@@ -576,6 +598,8 @@ pub struct RecorderCapabilities {
     #[serde(default)]
     pub frame_rates: Vec<FrameRateCapability>,
     #[serde(default)]
+    pub audio_isolation_available: bool,
+    #[serde(default)]
     pub diagnostics: Vec<String>,
 }
 
@@ -592,6 +616,7 @@ impl Default for RecorderCapabilities {
                 max: Rational::new(1_000, 1),
                 native: Vec::new(),
             }],
+            audio_isolation_available: false,
             diagnostics: Vec::new(),
         }
     }
@@ -610,6 +635,24 @@ impl RecorderCapabilities {
 
     pub fn validate_config(&self, config: &RecorderConfig) -> Result<(), String> {
         config.validate()?;
+        let has_enabled_system_audio = config
+            .audio_routes
+            .iter()
+            .any(|route| route.enabled && route.source_id.starts_with("system:"));
+        let has_enabled_application_audio = config
+            .audio_routes
+            .iter()
+            .any(|route| route.enabled && route.source_id.starts_with("application:"));
+        if config.system_audio_mode == SystemAudioMode::ExcludeApplications
+            && has_enabled_system_audio
+            && has_enabled_application_audio
+            && !self.audio_isolation_available
+        {
+            return Err(
+                "Excluding application audio from the system track is not available on this capture backend."
+                    .into(),
+            );
+        }
         if !self.screens.is_empty()
             && !config.screen_id.trim().is_empty()
             && !self
@@ -1288,11 +1331,13 @@ mod tests {
                 AudioRoute {
                     source_id: "system:default".into(),
                     track: 1,
+                    track_name: String::new(),
                     enabled: true,
                 },
                 AudioRoute {
                     source_id: "microphone:default".into(),
                     track: 1,
+                    track_name: String::new(),
                     enabled: true,
                 },
             ],
@@ -1308,6 +1353,7 @@ mod tests {
             audio_routes: vec![AudioRoute {
                 source_id: "application:spotify".into(),
                 track: 3,
+                track_name: String::new(),
                 enabled: true,
             }],
             ..RecorderConfig::default()
@@ -1340,11 +1386,157 @@ mod tests {
             audio_routes: vec![AudioRoute {
                 source_id: "application:".into(),
                 track: 3,
+                track_name: String::new(),
                 enabled: true,
             }],
             ..RecorderConfig::default()
         };
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn playback_device_routes_preserve_opaque_windows_ids() {
+        let device_id =
+            r#"playback:\\?\SWD#MMDEVAPI#{0.0.0.00000000}.{01234567-89ab-cdef-0123-456789abcdef}"#;
+        let config = RecorderConfig {
+            audio_encoder: "auto".into(),
+            audio_routes: vec![AudioRoute {
+                source_id: device_id.into(),
+                track: 2,
+                track_name: "Voicemeeter Input".into(),
+                enabled: true,
+            }],
+            ..RecorderConfig::default()
+        };
+        let capabilities = RecorderCapabilities {
+            backend: CaptureBackend::WindowsGraphicsCapture,
+            audio_sources: vec![AudioSourceCapability {
+                id: device_id.into(),
+                label: "Voicemeeter Input".into(),
+                kind: AudioSourceKind::PlaybackDevice,
+                process_id: None,
+                available: true,
+                detail: Some("WASAPI render endpoint".into()),
+            }],
+            ..RecorderCapabilities::default()
+        };
+
+        let json = serde_json::to_string(&capabilities).unwrap();
+        assert!(json.contains(r#""kind":"playbackDevice""#));
+        let decoded: RecorderCapabilities = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, capabilities);
+        assert!(capabilities.validate_config(&config).is_ok());
+    }
+
+    #[test]
+    fn stale_playback_device_routes_are_rejected_when_capabilities_are_known() {
+        let config = RecorderConfig {
+            audio_encoder: "auto".into(),
+            audio_routes: vec![AudioRoute {
+                source_id: "playback:missing-device".into(),
+                track: 2,
+                track_name: String::new(),
+                enabled: true,
+            }],
+            ..RecorderConfig::default()
+        };
+        let capabilities = RecorderCapabilities {
+            backend: CaptureBackend::WindowsGraphicsCapture,
+            audio_sources: vec![AudioSourceCapability {
+                id: "playback:present-device".into(),
+                label: "Present device".into(),
+                kind: AudioSourceKind::PlaybackDevice,
+                process_id: None,
+                available: true,
+                detail: Some("WASAPI render endpoint".into()),
+            }],
+            ..RecorderCapabilities::default()
+        };
+        assert!(capabilities.validate_config(&config).is_err());
+    }
+
+    #[test]
+    fn system_audio_mode_defaults_to_mixed_for_legacy_json() {
+        let config: RecorderConfig = serde_json::from_str(r#"{"replaySeconds":30}"#).unwrap();
+        assert_eq!(config.system_audio_mode, SystemAudioMode::Mixed);
+    }
+
+    #[test]
+    fn system_audio_mode_round_trips_through_json() {
+        let config = RecorderConfig {
+            system_audio_mode: SystemAudioMode::ExcludeApplications,
+            ..RecorderConfig::default()
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let decoded: RecorderConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            decoded.system_audio_mode,
+            SystemAudioMode::ExcludeApplications
+        );
+    }
+
+    #[test]
+    fn audio_track_names_round_trip_and_default_for_legacy_routes() {
+        let legacy: RecorderConfig = serde_json::from_str(
+            r#"{"audioRoutes":[{"sourceId":"system:default","track":1,"enabled":true}]}"#,
+        )
+        .unwrap();
+        assert_eq!(legacy.audio_routes[0].track_name, "");
+
+        let config = RecorderConfig {
+            audio_routes: vec![AudioRoute {
+                source_id: "system:default".into(),
+                track: 1,
+                track_name: "Game mix".into(),
+                enabled: true,
+            }],
+            ..RecorderConfig::default()
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let decoded: RecorderConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.audio_routes[0].track_name, "Game mix");
+    }
+
+    #[test]
+    fn application_exclusion_requires_backend_support_when_system_audio_is_enabled() {
+        let config = RecorderConfig {
+            system_audio_mode: SystemAudioMode::ExcludeApplications,
+            audio_encoder: "auto".into(),
+            audio_routes: vec![
+                AudioRoute {
+                    source_id: "system:default".into(),
+                    track: 1,
+                    track_name: String::new(),
+                    enabled: true,
+                },
+                AudioRoute {
+                    source_id: "application:discord".into(),
+                    track: 2,
+                    track_name: String::new(),
+                    enabled: true,
+                },
+            ],
+            ..RecorderConfig::default()
+        };
+        let capabilities = RecorderCapabilities {
+            backend: CaptureBackend::PipeWire,
+            audio_sources: vec![AudioSourceCapability {
+                id: "system:default".into(),
+                label: "System".into(),
+                kind: AudioSourceKind::System,
+                process_id: None,
+                available: true,
+                detail: None,
+            }],
+            ..RecorderCapabilities::default()
+        };
+        assert!(capabilities.validate_config(&config).is_err());
+
+        let supported = RecorderCapabilities {
+            audio_isolation_available: true,
+            ..capabilities
+        };
+        assert!(supported.validate_config(&config).is_ok());
     }
 
     #[test]
@@ -1357,6 +1549,7 @@ mod tests {
         assert!(config.adaptive_quantization);
         assert!(!config.lookahead);
         assert!(config.notify_on_save);
+        assert_eq!(config.system_audio_mode, SystemAudioMode::Mixed);
     }
 
     #[test]

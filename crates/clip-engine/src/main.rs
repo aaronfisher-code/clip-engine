@@ -19,10 +19,13 @@ static AmdPowerXpressRequestHighPerformance: i32 = 1;
 
 mod app;
 mod player;
+mod startup;
 mod theme;
+mod tray;
 mod window_state;
 
 fn main() {
+    configure_numeric_locale();
     isolate_linux_input();
     install_panic_hook();
     if let Err(error) = run() {
@@ -33,22 +36,64 @@ fn main() {
     }
 }
 
+fn configure_numeric_locale() {
+    #[cfg(all(unix, not(target_os = "macos")))]
+    unsafe {
+        // libmpv requires LC_NUMERIC to remain the C locale when its client
+        // API is created. Keep child processes on the same setting too.
+        std::env::set_var("LC_NUMERIC", "C");
+        let _ = libc::setlocale(libc::LC_NUMERIC, c"C".as_ptr());
+    }
+}
+
 fn run() -> anyhow::Result<()> {
+    let instance = single_instance::SingleInstance::new("dev.dab.clip-engine")
+        .map_err(|error| anyhow::anyhow!("Could not create the single-instance lock: {error}"))?;
+    if !instance.is_single() {
+        return Ok(());
+    }
+
     check_runtime_files()?;
     let runtime = Runtime::new().map_err(|error| anyhow::anyhow!("tokio runtime: {error}"))?;
     let engine = Engine::initialize(runtime.handle().clone())
         .map_err(|error| anyhow::anyhow!("Could not start {PRODUCT_NAME}: {error:#}"))?;
+    let background = startup::is_background_requested(std::env::args_os());
+    let launch_at_login = match engine.database.setting(startup::LAUNCH_AT_LOGIN_SETTING)? {
+        Some(value) => value != "false",
+        None => {
+            engine
+                .database
+                .put_setting(startup::LAUNCH_AT_LOGIN_SETTING, "true")?;
+            true
+        }
+    };
+    let startup_error = startup::set_enabled(launch_at_login)
+        .err()
+        .map(|error| format!("{error:#}"));
     let _keep_alive = runtime;
     let icon = load_icon();
-    let mut glow_options = native_options(icon);
+    let mut glow_options = native_options(icon, background);
     glow_options.renderer = Renderer::Glow;
     glow_options.glow_options.hardware_acceleration = HardwareAcceleration::Required;
-    match launch(engine.clone(), glow_options) {
+    match launch(
+        engine.clone(),
+        glow_options,
+        background,
+        launch_at_login,
+        startup_error.clone(),
+    ) {
         Ok(()) => Ok(()),
         Err(error) if should_try_wgpu(&error) => {
-            let mut wgpu_options = native_options(load_icon());
+            let mut wgpu_options = native_options(load_icon(), background);
             wgpu_options.renderer = Renderer::Wgpu;
-            launch(engine, wgpu_options).map_err(|error| anyhow::anyhow!("{error}\n\n{GPU_HELP}"))
+            launch(
+                engine,
+                wgpu_options,
+                background,
+                launch_at_login,
+                startup_error,
+            )
+            .map_err(|error| anyhow::anyhow!("{error}\n\n{GPU_HELP}"))
         }
         Err(error) => Err(anyhow::anyhow!("{error}\n\n{GPU_HELP}")),
     }
@@ -75,13 +120,14 @@ fn check_runtime_files() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn native_options(icon: Arc<IconData>) -> eframe::NativeOptions {
+fn native_options(icon: Arc<IconData>, background: bool) -> eframe::NativeOptions {
     let viewport = window_state::WindowState::load().apply(
         ViewportBuilder::default()
             .with_min_inner_size(window_state::MIN_INNER_SIZE)
             .with_title(PRODUCT_NAME)
             .with_app_id("dev.dab.clip-engine")
             .with_drag_and_drop(true)
+            .with_visible(!background)
             .with_icon(icon),
     );
     #[allow(unused_mut)]
@@ -106,11 +152,25 @@ fn native_options(icon: Arc<IconData>) -> eframe::NativeOptions {
     options
 }
 
-fn launch(engine: Engine, options: eframe::NativeOptions) -> Result<(), eframe::Error> {
+fn launch(
+    engine: Engine,
+    options: eframe::NativeOptions,
+    background: bool,
+    launch_at_login: bool,
+    startup_error: Option<String>,
+) -> Result<(), eframe::Error> {
     eframe::run_native(
         "clip-engine",
         options,
-        Box::new(move |cc| Ok(Box::new(app::ClipApp::new(cc, engine)))),
+        Box::new(move |cc| {
+            Ok(Box::new(app::ClipApp::new(
+                cc,
+                engine,
+                background,
+                launch_at_login,
+                startup_error,
+            )))
+        }),
     )
 }
 
@@ -216,5 +276,17 @@ fn show_error_dialog(title: &str, message: &str) {
             .set_description(message)
             .set_level(rfd::MessageLevel::Error)
             .show();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn second_instance_is_rejected() {
+        let key = format!("dev.dab.clip-engine-test-{}", std::process::id());
+        let first = single_instance::SingleInstance::new(&key).unwrap();
+        let second = single_instance::SingleInstance::new(&key).unwrap();
+        assert!(first.is_single());
+        assert!(!second.is_single());
     }
 }

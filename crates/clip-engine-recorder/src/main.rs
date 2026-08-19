@@ -191,6 +191,7 @@ fn run_backend_smoke(mut backend: Box<dyn RecorderBackend>) -> anyhow::Result<se
         .map(|(index, source)| AudioRoute {
             source_id: source.id.clone(),
             track: u8::try_from(index + 1).expect("six audio tracks fit in u8"),
+            track_name: source.label.clone(),
             enabled: true,
         })
         .collect();

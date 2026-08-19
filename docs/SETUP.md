@@ -125,8 +125,9 @@ The Recorder panel has two encoding modes:
 
 MKV is the default replay container. It is safer than MP4 if the helper or
 machine stops unexpectedly and keeps each configured audio route on its own
-track. MP4 is available in Advanced mode when a downstream workflow requires
-it. The release runtime includes the pinned libobs libraries and plugins; users
+track with its configured name in stream metadata. MP4 is available in Advanced
+mode when a downstream workflow requires it. The release runtime includes the
+pinned libobs libraries and plugins; users
 do not need a separate OBS Studio installation. NVENC, QSV, or AMF still
 requires the corresponding vendor driver and hardware support.
 
@@ -135,16 +136,31 @@ requires the corresponding vendor driver and hardware support.
 - Windows uses OBS monitor capture, WASAPI system/microphone capture, and the
   WASAPI process-loopback source. Application routes are discovered from
   visible windows and use an encoded selector that prefers the executable, so
-  changing Spotify/Discord window titles does not break the route.
+  changing Spotify/Discord window titles does not break the route. The system
+  route remains the normal WASAPI output mix, so application tracks can overlap
+  it.
+- Windows also enumerates active Core Audio `eRender` endpoints and exposes
+  optional **Playback-device tracks**. Each route stores the opaque
+  `IMMDevice::GetId()` value rather than a friendly name and passes that exact
+  ID to OBS `wasapi_output_capture` with device timing enabled. Route apps to
+  Voicemeeter buses or Windows per-app output devices, refresh the Recorder
+  capabilities, and add only the endpoints you want on separate tracks. Disable
+  **System audio** when avoiding overlap. These tracks capture endpoint mixes;
+  they do not subtract processes automatically, and a recreated virtual device
+  can leave a saved route unavailable until it is refreshed and added again.
 - X11 uses OBS `xshm_input` and PulseAudio-compatible sources.
 - Wayland uses OBS PipeWire plus xdg-desktop-portal for screen selection.
-  The optional `linux-pipewire-audio` OBS plugin provides application capture:
-  the helper discovers active PipeWire/PipeWire-Pulse streams and routes each
-  selected executable or application name to its own track. Applications that
-  are not currently playing audio can be entered manually and the plugin will
-  reconnect when they appear. Compositors that do not provide a global-hotkey
-  protocol may reject global replay hotkeys; the Recorder panel reports that
-  diagnostic and manual Save replay remains available.
+  The optional `linux-pipewire-audio` OBS plugin provides application capture
+  on both Linux display backends: the helper discovers active
+  PipeWire/PipeWire-Pulse streams and routes each selected executable or
+  application name to its own track. Applications that are not currently
+  playing audio can be entered manually and the plugin will reconnect when
+  they appear. When the plugin is available, the Audio tab's **Exclude enabled
+  application tracks from System audio** option configures a PipeWire
+  exclusion source, keeping selected application streams out of the system
+  track while retaining other output audio. Compositors that do not provide a
+  global-hotkey protocol may reject global replay hotkeys; the Recorder panel
+  reports that diagnostic and manual Save replay remains available.
 - Successful and failed replay saves emit a desktop notification and a short
   system sound from the helper, so a focused game still gets feedback.
 - Replay files are written as encoded MKV packets in the helper's staging
@@ -154,6 +170,30 @@ requires the corresponding vendor driver and hardware support.
   with `bitrate × replay seconds ÷ 8`, plus OBS/capture overhead; there is no
   artificial memory ceiling, so high-bitrate, long, or software-encoded
   profiles can exceed the 150–300 MB 1080p60 starting estimate.
+
+### Tray and login startup
+
+The desktop keeps a tray icon alive while the replay helper is running. Closing
+the editor window hides it rather than stopping the helper; use the tray menu's
+Quit action to shut down the application. The Recorder panel has a
+**Launch Clip Engine at login** setting, enabled by default. The generated
+startup entry passes `--background`, which starts the app hidden and starts the
+saved replay configuration. A red dot on the tray icon indicates that the replay
+buffer is currently running.
+
+Windows uses the current user's Run registry entry. Linux uses an XDG Autostart
+desktop entry under `~/.config/autostart` (or `$XDG_CONFIG_HOME/autostart`).
+The tray implementation uses GTK/AppIndicator on Linux, so development and CI
+builds need `libgtk-3-dev` and `libappindicator3-dev`. A desktop environment
+must provide a StatusNotifier/AppIndicator host for the icon to be visible;
+GNOME and some Wayland sessions require an AppIndicator/tray extension. The
+replay helper and global hotkey may still be limited by the compositor.
+Deb packages declare `libappindicator3-1` as the tray runtime dependency;
+AppImages carry the linked runtime libraries.
+
+When launched from an AppImage, the app registers the current `APPIMAGE` path
+when that environment variable is available. Moving the AppImage later can
+require disabling and re-enabling **Launch Clip Engine at login**.
 
 To prepare a release runtime, provide a published archive URL and its SHA-256:
 
@@ -381,18 +421,18 @@ it does not yet verify a separate packager signature.
 
 ## Storage and deletion behavior
 
-Local originals are never deleted by Clip Engine. Removing a local clip deletes only
-its preview, exports, and SQLite history. Deleting a published version deletes its R2
-video and thumbnail plus the local export. Extending a clip rewrites its two R2 objects
-and advances its D1 expiry by another 30 days.
+Removing a local clip permanently deletes its original recording from the device,
+along with its preview, exports, and SQLite history. Deleting a published version
+deletes its R2 video and thumbnail plus the local export. Extending a clip rewrites
+its two R2 objects and advances its D1 expiry by another 30 days.
 
 Desktop data is stored in the platform application-data directory:
 
 - Windows: `%LOCALAPPDATA%\dev.dab.clip-engine`
 - Linux: `$XDG_DATA_HOME/dev.dab.clip-engine` or `~/.local/share/dev.dab.clip-engine`
 
-The SQLite database is the only irreplaceable local app file. Originals remain wherever
-the user recorded them. The cloud data plane is small enough that Workers, D1, and R2
+The SQLite database is the only irreplaceable local app file. Published versions are
+managed separately from local originals. The cloud data plane is small enough that Workers, D1, and R2
 are normally simpler and cheaper than exposing a home server; the home server is better
 used for encrypted backups of the repository, signing key, and optional source clips.
 

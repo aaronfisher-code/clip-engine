@@ -10,6 +10,7 @@ default-run = "clip-engine"
 
 [dependencies]
 anyhow = "1"
+auto-launcher = "1.1.0"
 chrono = { version = "0.4", features = ["serde"] }
 clip-engine-core = { path = "../clip-engine-core" }
 # No accesskit: AT-SPI panics on Linux key events abort the AppImage (panic=abort).
@@ -23,7 +24,9 @@ raw-window-handle = "0.6"
 rfd = "0.17"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+single-instance = "0.3.3"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
+tray-icon = { version = "0.24.2", default-features = false, features = ["gtk"] }
 wgpu = { version = "30", default-features = false, features = ["dx12", "vulkan", "gles", "wgsl"] }
 winit = { version = "0.30", default-features = false, features = ["x11"] }
 
@@ -37,6 +40,9 @@ windows = "0.62"
 
 [target.'cfg(windows)'.build-dependencies]
 winresource = "0.1"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = "0.18"
 
 [package.metadata.packager]
 product-name = "Dabs Clip Engine"
@@ -90,4 +96,4 @@ excluded-libraries = [
 ]
 
 [package.metadata.packager.deb]
-depends = ["libmpv2 | libmpv1"]
+depends = ["libmpv2 | libmpv1", "libappindicator3-1"]

@@ -32,4 +32,15 @@ Linux runtimes that advertise per-application audio must include the
 `linux-pipewire-audio` plugin under `obs-plugins/` plus its matching locale
 data under `data/obs-plugins/linux-pipewire-audio/`. The helper uses that
 plugin to link Spotify, Discord, games, and other PipeWire application streams
-to independent OBS tracks; system and microphone capture do not depend on it.
+to independent OBS tracks and, when requested, build a system track that
+excludes selected application streams; system and microphone capture do not
+depend on it.
+
+Windows playback-device tracks use the standard `wasapi_output_capture` source
+and Core Audio render-endpoint IDs, so no additional OBS plugin is required.
+The endpoint itself is mixed: use Voicemeeter or Windows per-app output routing
+to place applications on separate virtual devices, and disable the default
+System audio route when overlap is unwanted. Recreated virtual devices can
+produce stale saved IDs and must be refreshed and added again; Windows process
+subtraction is not provided by this endpoint-based path. User-defined audio
+route names are passed to the FFmpeg muxer as stream titles.

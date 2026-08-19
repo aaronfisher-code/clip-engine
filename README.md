@@ -65,7 +65,8 @@ Record  →  trim & mix locally  →  publish 1080p  →  send the link
 **OBS-aware import.** Grab files with the system picker, or drop them from an inbox under your Videos folder.
 
 **Built-in replay recorder.** Open **Recorder** to select a display, route
-system/microphone and optional per-application audio to separate MKV tracks, choose a reported
+system/microphone and optional per-application audio to separately named MKV tracks, and on
+Windows optionally capture separately routed playback devices, choose a reported
 frame rate (including 120–240 fps when the capture path supports it), set the
 replay length, and bind a global save hotkey. Saving a clip shows a desktop
 notification with a short system sound so you can confirm the buffer worked
@@ -82,6 +83,14 @@ is available for workflows that require it. The libobs helper is a separate
 process and is started lazily, so the editor does not carry OBS's runtime during
 ordinary library work.
 
+**System tray capture.** Clip Engine can stay resident in the Windows notification area or Linux
+system tray. Closing the editor hides it instead of stopping the replay buffer; the tray menu can
+show the editor, start or stop the buffer, save the last replay, or quit. Launch at login is
+enabled by default and starts the app hidden with the replay buffer active; it can be disabled in
+the Recorder panel. A red dot on the tray icon indicates that the replay buffer is running. Linux
+desktops need a StatusNotifier/AppIndicator host (GNOME may require a tray extension), and
+Wayland compositors can still restrict global hotkeys.
+
 The recorder bundles the matching libobs runtime in release packages. Hardware
 encoders still require the current vendor driver (for example, an NVENC-capable
 NVIDIA driver); installing OBS Studio separately is not required.
@@ -91,7 +100,17 @@ the selected executable even when a window title changes. On CachyOS/Linux,
 application routes use the `linux-pipewire-audio` OBS plugin and match the
 PipeWire application executable/name; the plugin reconnects when the app starts
 or its audio stream appears. System and microphone capture continue to use the
-default PipeWire/PulseAudio devices.
+default PipeWire/PulseAudio devices. On Linux, enable **Exclude enabled
+application tracks from System audio** in the Recorder audio settings to keep
+selected application audio (for example, Discord) out of the system track.
+Windows keeps the normal WASAPI output mix in the system track, so process
+application tracks there are separate but can overlap the system audio. To avoid
+that overlap, route apps through Voicemeeter or Windows per-app output settings,
+then add the resulting **Playback-device tracks** in the Recorder audio tab.
+Those tracks capture individual Windows render endpoints using their opaque
+device IDs; they do not provide automatic Windows process subtraction. Disable
+the default System audio route when you want only the explicitly routed
+endpoints, and refresh/re-add a route if a virtual device is recreated.
 
 Recording memory is measured on the helper rather than capped artificially:
 encoded replay storage is approximately `bitrate × replay seconds ÷ 8`, plus
@@ -112,7 +131,7 @@ Anyone with the link can watch. The page looks like a finished product — title
 - Each published clip gets its own public page — no account needed to watch
 - Links last **30 days** from publish (or from the last time you extend them)
 - Deleting a published version removes the online video and thumbnail
-- Your original recording is never deleted by Clip Engine
+- Deleting a local clip permanently removes its original recording from your device
 
 ---
 
@@ -133,7 +152,7 @@ Forgot a password? The owner can issue a one-day reset from **Manage access → 
 
 | | |
 | --- | --- |
-| Original recordings | Left where you saved them. Clip Engine does not delete them. |
+| Original recordings | Deleted when you choose **Delete from device**; otherwise left where you saved them. |
 | Local library | Windows: `%LOCALAPPDATA%\dev.dab.clip-engine`<br>Linux: `~/.local/share/dev.dab.clip-engine` |
 | Sign-in | Stored in Windows Credential Manager or the Linux keyring — not in a random file on disk |
 | Cloud upload | Only the published 1080p clip and its thumbnail, with short-lived credentials scoped to those two files |

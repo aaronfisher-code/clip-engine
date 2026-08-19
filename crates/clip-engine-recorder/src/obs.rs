@@ -1,10 +1,10 @@
 use super::{RecorderBackend, ReplayFile};
 use anyhow::{Context, Result};
 use clip_engine_recorder_protocol::{
-    AudioSourceCapability, AudioSourceKind, CaptureBackend, EffectiveRecorderSettings,
+    AudioRoute, AudioSourceCapability, AudioSourceKind, CaptureBackend, EffectiveRecorderSettings,
     EncoderCapability, EncoderSettingCapability, EncoderSettingKind, FrameRateCapability,
     Multipass, RateControl, Rational, RecorderCapabilities, RecorderConfig, RecorderMode,
-    RecorderState, RecorderStatus, ScreenCapability,
+    RecorderState, RecorderStatus, ScreenCapability, SystemAudioMode,
 };
 use display_info::DisplayInfo;
 use libobs_wrapper::{
@@ -13,7 +13,7 @@ use libobs_wrapper::{
     data::{
         object::ObsObjectTrait,
         properties::{ObsProperty, ObsPropertyObject},
-        ObsDataSetters,
+        ObsData, ObsDataSetters,
     },
     encoders::{
         video::ObsVideoEncoder, ObsAudioEncoderBuilder, ObsContextEncoders, ObsVideoEncoderBuilder,
@@ -35,6 +35,19 @@ use std::{
     path::{Path, PathBuf},
     thread,
     time::{Duration, Instant, SystemTime},
+};
+#[cfg(windows)]
+use windows::{
+    core::HRESULT,
+    Win32::{
+        Devices::FunctionDiscovery::PKEY_Device_FriendlyName,
+        Media::Audio::{eRender, IMMDeviceEnumerator, MMDeviceEnumerator, DEVICE_STATE_ACTIVE},
+        System::Com::{
+            CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize,
+            StructuredStorage::{PropVariantClear, PropVariantToString, PROPVARIANT},
+            CLSCTX_ALL, COINIT_MULTITHREADED, STGM_READ,
+        },
+    },
 };
 
 pub struct ObsBackend {
@@ -81,6 +94,7 @@ impl ObsBackend {
             !diagnostic.starts_with("Application audio capture is available")
                 && !diagnostic.starts_with("PipeWire application capture is available")
                 && !diagnostic.starts_with("PipeWire application audio is available")
+                && !diagnostic.starts_with("WASAPI playback devices could not be enumerated")
         });
 
         if self.input_types.contains("wasapi_process_output_capture") {
@@ -107,6 +121,55 @@ impl ObsBackend {
                                 )),
                             },
                         ));
+                }
+            }
+        }
+
+        if self.input_types.contains("wasapi_output_capture") {
+            capabilities
+                .audio_sources
+                .retain(|source| source.kind != AudioSourceKind::PlaybackDevice);
+            #[cfg(windows)]
+            {
+                match enumerate_windows_playback_devices() {
+                    Ok(devices) => capabilities.audio_sources.extend(devices.into_iter().map(
+                        |(device_id, label)| {
+                            playback_device_capability(
+                                &device_id,
+                                label,
+                                true,
+                                Some("WASAPI render endpoint".into()),
+                            )
+                        },
+                    )),
+                    Err(error) => capabilities.diagnostics.push(format!(
+                        "WASAPI playback devices could not be enumerated: {error:#}"
+                    )),
+                }
+            }
+        }
+        if let Some(config) = &self.config {
+            let configured_playback_ids = config
+                .audio_routes
+                .iter()
+                .filter(|route| route.source_id.starts_with("playback:"))
+                .map(|route| route.source_id.as_str());
+            for source_id in configured_playback_ids {
+                if !capabilities
+                    .audio_sources
+                    .iter()
+                    .any(|source| source.id == source_id)
+                {
+                    let endpoint_id = source_id.strip_prefix("playback:").unwrap_or(source_id);
+                    capabilities.audio_sources.push(playback_device_capability(
+                        endpoint_id,
+                        format!("Unavailable playback device ({endpoint_id})"),
+                        false,
+                        Some(
+                            "This Windows render endpoint is no longer active. Refresh or reconnect the device before enabling this route."
+                                .into(),
+                        ),
+                    ));
                 }
             }
         }
@@ -172,17 +235,28 @@ impl ObsBackend {
         let _ = screen_item.fit_source_to_screen();
 
         let mut sources = vec![screen_source];
-        let mut tracks = BTreeSet::new();
+        let mut tracks = BTreeMap::new();
+        let excluded_applications = system_audio_exclusion_selectors(&config);
         for route in config.audio_routes.iter().filter(|route| route.enabled) {
-            let (source, track) = self
-                .create_audio_source(&route.source_id, route.track)
-                .with_context(|| format!("create audio source {}", route.source_id))?;
+            let (source, track) =
+                if route.source_id.starts_with("system:") && !excluded_applications.is_empty() {
+                    self.create_excluding_system_audio_source(&excluded_applications, route.track)
+                        .with_context(|| {
+                            format!(
+                                "create isolated system audio source for track {}",
+                                route.track
+                            )
+                        })?
+                } else {
+                    self.create_audio_source(&route.source_id, route.track)
+                        .with_context(|| format!("create audio source {}", route.source_id))?
+                };
             set_audio_mixers(&source, track)?;
             scene
                 .add_source(source.clone())
                 .with_context(|| format!("add audio source {}", route.source_id))?;
             sources.push(source);
-            tracks.insert(track);
+            tracks.insert(track, audio_track_name(route));
         }
 
         let staging_directory = staging_directory(&config);
@@ -242,7 +316,7 @@ impl ObsBackend {
             .iter()
             .find(|encoder| encoder.id == audio_encoder_id);
         let mut audio_diagnostics = Vec::new();
-        for track in tracks {
+        for (track, track_name) in tracks {
             let audio_encoder = self
                 .select_audio_encoder_builder(&audio_encoder_id)
                 .context("select audio encoder")?;
@@ -261,7 +335,7 @@ impl ObsBackend {
             audio_encoder
                 .apply_to_context(
                     &mut output,
-                    &format!("Clip Engine Audio Track {track}"),
+                    &track_name,
                     Some(audio_settings),
                     None,
                     usize::from(track - 1),
@@ -522,6 +596,34 @@ impl ObsBackend {
         .map_err(Into::into)
     }
 
+    fn create_excluding_system_audio_source(
+        &self,
+        selectors: &[String],
+        track: u8,
+    ) -> Result<(ObsSourceRef, u8)> {
+        if !self
+            .input_types
+            .contains("pipewire_audio_application_capture")
+        {
+            anyhow::bail!(
+                "excluding application audio from the system track requires the linux-pipewire-audio OBS plugin"
+            );
+        }
+        let settings_json = pipewire_application_exclusion_settings(selectors).to_string();
+        let settings = ObsData::from_json(&settings_json, self.context.runtime().clone())
+            .map_err(|error| anyhow::anyhow!(error.to_string()))
+            .context("create PipeWire system audio exclusion settings")?;
+        let source = ObsSourceRef::new(
+            "pipewire_audio_application_capture",
+            format!("Clip Engine System Audio Track {track} (excluding apps)"),
+            Some(settings.into_immutable()),
+            None,
+            self.context.runtime().clone(),
+        )
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        Ok((source, track))
+    }
+
     fn create_audio_source(&self, source_id: &str, track: u8) -> Result<(ObsSourceRef, u8)> {
         let mut settings = self
             .context
@@ -548,6 +650,18 @@ impl ObsBackend {
                 (
                     "wasapi_input_capture",
                     format!("Clip Engine Microphone Track {track}"),
+                )
+            } else if let Some(device_id) = playback_device_id(source_id) {
+                if device_id.trim().is_empty() {
+                    anyhow::bail!(
+                        "playback-device audio source is missing its Windows endpoint ID"
+                    );
+                }
+                settings.set_string("device_id", device_id)?;
+                settings.set_bool("use_device_timing", true)?;
+                (
+                    "wasapi_output_capture",
+                    format!("Clip Engine Playback Device Track {track}"),
                 )
             } else {
                 settings.set_string("device_id", source_id.trim_start_matches("system:"))?;
@@ -1536,6 +1650,24 @@ fn discover_capabilities(
             available: true,
             detail: Some("Default WASAPI output".into()),
         });
+        #[cfg(windows)]
+        {
+            match enumerate_windows_playback_devices() {
+                Ok(devices) => {
+                    audio_sources.extend(devices.into_iter().map(|(device_id, label)| {
+                        playback_device_capability(
+                            &device_id,
+                            label,
+                            true,
+                            Some("WASAPI render endpoint".into()),
+                        )
+                    }));
+                }
+                Err(error) => diagnostics.push(format!(
+                    "WASAPI playback devices could not be enumerated: {error:#}"
+                )),
+            }
+        }
     }
     if input_types.iter().any(|id| id == "wasapi_input_capture") {
         audio_sources.push(AudioSourceCapability {
@@ -1644,7 +1776,46 @@ fn discover_capabilities(
             max: Rational::new(max_fps, 1),
             native,
         }],
+        audio_isolation_available: cfg!(target_os = "linux") && has_pipewire_application,
         diagnostics,
+    })
+}
+
+fn system_audio_exclusion_selectors(config: &RecorderConfig) -> Vec<String> {
+    if config.system_audio_mode != SystemAudioMode::ExcludeApplications {
+        return Vec::new();
+    }
+
+    let mut seen = BTreeSet::new();
+    config
+        .audio_routes
+        .iter()
+        .filter(|route| route.enabled)
+        .filter_map(|route| route.source_id.strip_prefix("application:"))
+        .map(str::trim)
+        .filter(|selector| !selector.is_empty())
+        .filter(|selector| seen.insert(selector.to_ascii_lowercase()))
+        .map(str::to_owned)
+        .collect()
+}
+
+fn pipewire_application_exclusion_settings(selectors: &[String]) -> serde_json::Value {
+    let apps = selectors
+        .iter()
+        .map(|selector| {
+            serde_json::json!({
+                "hidden": false,
+                "selected": false,
+                "value": selector,
+            })
+        })
+        .collect::<Vec<_>>();
+    serde_json::json!({
+        "CaptureMode": 1,
+        "MatchPriorty": 0,
+        "MatchPriority": 0,
+        "ExceptApp": true,
+        "apps": apps,
     })
 }
 
@@ -2051,6 +2222,101 @@ fn enumerate_windows() -> Vec<(String, String, u32, String)> {
 }
 
 #[cfg(windows)]
+fn enumerate_windows_playback_devices() -> Result<Vec<(String, String)>> {
+    let initialization = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
+    let changed_mode = HRESULT(0x8001_0106_u32 as i32);
+    if initialization.is_err() && initialization != changed_mode {
+        anyhow::bail!("COM initialization failed: {initialization:?}");
+    }
+    let should_uninitialize = initialization.is_ok();
+
+    let result = (|| {
+        let enumerator: IMMDeviceEnumerator =
+            unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) }?;
+        let collection = unsafe { enumerator.EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE) }?;
+        let count = unsafe { collection.GetCount() }?;
+        let mut devices = Vec::with_capacity(count as usize);
+
+        for index in 0..count {
+            let device = unsafe { collection.Item(index) }?;
+            let device_id = unsafe { device.GetId() }?;
+            let device_id_result = unsafe { device_id.to_string() };
+            unsafe {
+                CoTaskMemFree(Some(device_id.as_ptr() as *const core::ffi::c_void));
+            }
+            let device_id = device_id_result
+                .map_err(|error| anyhow::anyhow!("invalid endpoint ID: {error}"))?;
+            if device_id.is_empty() {
+                continue;
+            }
+
+            let label = windows_playback_device_friendly_name(&device)
+                .unwrap_or_else(|_| device_id.clone());
+            devices.push((device_id, label));
+        }
+
+        Ok(deduplicate_playback_devices(devices))
+    })();
+
+    if should_uninitialize {
+        unsafe {
+            CoUninitialize();
+        }
+    }
+    result
+}
+
+fn playback_device_capability(
+    device_id: &str,
+    label: String,
+    available: bool,
+    detail: Option<String>,
+) -> AudioSourceCapability {
+    AudioSourceCapability {
+        id: format!("playback:{device_id}"),
+        label,
+        kind: AudioSourceKind::PlaybackDevice,
+        process_id: None,
+        available,
+        detail,
+    }
+}
+
+#[cfg(windows)]
+fn windows_playback_device_friendly_name(
+    device: &windows::Win32::Media::Audio::IMMDevice,
+) -> Result<String> {
+    let property_store = unsafe { device.OpenPropertyStore(STGM_READ) }?;
+    let mut value = PROPVARIANT::default();
+    let result = (|| {
+        unsafe { property_store.GetValue(&PKEY_Device_FriendlyName) }?;
+        let mut buffer = [0u16; 512];
+        unsafe { PropVariantToString(&value, &mut buffer) }?;
+        Ok(String::from_utf16_lossy(&buffer)
+            .trim_end_matches('\0')
+            .trim()
+            .to_string())
+    })();
+    unsafe {
+        let _ = PropVariantClear(&mut value);
+    }
+    result
+}
+
+#[cfg(any(windows, test))]
+fn deduplicate_playback_devices(devices: Vec<(String, String)>) -> Vec<(String, String)> {
+    let mut seen = BTreeSet::new();
+    devices
+        .into_iter()
+        .filter(|(id, _)| seen.insert(id.clone()))
+        .collect()
+}
+
+fn playback_device_id(source_id: &str) -> Option<&str> {
+    source_id.strip_prefix("playback:")
+}
+
+#[cfg(windows)]
 fn resolve_windows_audio_selector(value: &str) -> String {
     let requested = value.trim();
     enumerate_windows()
@@ -2160,6 +2426,15 @@ fn audio_mixer_mask(track: u8) -> Result<u32> {
         anyhow::bail!("audio track must be between 1 and 6");
     }
     Ok(1_u32 << u32::from(track - 1))
+}
+
+fn audio_track_name(route: &AudioRoute) -> String {
+    let name = route.track_name.trim();
+    if name.is_empty() {
+        format!("Track {}", route.track)
+    } else {
+        name.to_string()
+    }
 }
 
 fn is_obs_runtime_root(root: &Path) -> bool {
@@ -2478,6 +2753,133 @@ mod tests {
         assert_eq!(masks, vec![1, 2, 4, 8, 16, 32]);
         assert!(audio_mixer_mask(0).is_err());
         assert!(audio_mixer_mask(7).is_err());
+    }
+
+    #[test]
+    fn audio_track_names_use_custom_values_or_track_fallbacks() {
+        let named = AudioRoute {
+            source_id: "system:default".into(),
+            track: 1,
+            track_name: "  Game mix  ".into(),
+            enabled: true,
+        };
+        let unnamed = AudioRoute {
+            source_id: "microphone:default".into(),
+            track: 2,
+            track_name: String::new(),
+            enabled: true,
+        };
+        assert_eq!(audio_track_name(&named), "Game mix");
+        assert_eq!(audio_track_name(&unnamed), "Track 2");
+    }
+
+    #[test]
+    fn playback_device_route_ids_are_opaque_and_deduplicated() {
+        let endpoint_id =
+            r#"\\?\SWD#MMDEVAPI#{0.0.0.00000000}.{01234567-89ab-cdef-0123-456789abcdef}"#;
+        let source_id = format!("playback:{endpoint_id}");
+        assert_eq!(playback_device_id(&source_id), Some(endpoint_id));
+        assert_eq!(playback_device_id("system:default"), None);
+        assert_eq!(playback_device_id("playback:"), Some(""));
+
+        let devices = deduplicate_playback_devices(vec![
+            ("first".into(), "First".into()),
+            ("first".into(), "Duplicate first".into()),
+            ("second".into(), "Second".into()),
+        ]);
+        assert_eq!(
+            devices,
+            vec![
+                ("first".to_string(), "First".to_string()),
+                ("second".to_string(), "Second".to_string())
+            ]
+        );
+        let capability = playback_device_capability(
+            endpoint_id,
+            "Virtual output".into(),
+            true,
+            Some("WASAPI render endpoint".into()),
+        );
+        assert_eq!(capability.id, source_id);
+        assert_eq!(capability.kind, AudioSourceKind::PlaybackDevice);
+        assert!(capability.available);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_active_render_endpoints_have_stable_ids() {
+        let devices = enumerate_windows_playback_devices().unwrap();
+        let mut ids = BTreeSet::new();
+        for (id, label) in devices {
+            assert!(!id.is_empty());
+            assert!(!label.is_empty());
+            assert!(ids.insert(id));
+        }
+    }
+
+    #[test]
+    fn system_audio_exclusion_uses_enabled_application_selectors_once() {
+        let config = RecorderConfig {
+            system_audio_mode: SystemAudioMode::ExcludeApplications,
+            audio_routes: vec![
+                clip_engine_recorder_protocol::AudioRoute {
+                    source_id: "system:default".into(),
+                    track: 1,
+                    track_name: String::new(),
+                    enabled: true,
+                },
+                clip_engine_recorder_protocol::AudioRoute {
+                    source_id: "application:Discord".into(),
+                    track: 2,
+                    track_name: String::new(),
+                    enabled: true,
+                },
+                clip_engine_recorder_protocol::AudioRoute {
+                    source_id: "application:discord".into(),
+                    track: 3,
+                    track_name: String::new(),
+                    enabled: false,
+                },
+                clip_engine_recorder_protocol::AudioRoute {
+                    source_id: "application:spotify".into(),
+                    track: 4,
+                    track_name: String::new(),
+                    enabled: true,
+                },
+            ],
+            ..RecorderConfig::default()
+        };
+        assert_eq!(
+            system_audio_exclusion_selectors(&config),
+            vec!["Discord".to_string(), "spotify".to_string()]
+        );
+
+        let settings =
+            pipewire_application_exclusion_settings(&system_audio_exclusion_selectors(&config));
+        assert_eq!(settings["CaptureMode"], 1);
+        assert_eq!(settings["ExceptApp"], true);
+        assert_eq!(
+            settings["apps"][0]["value"],
+            serde_json::Value::String("Discord".into())
+        );
+        assert_eq!(
+            settings["apps"][1]["value"],
+            serde_json::Value::String("spotify".into())
+        );
+    }
+
+    #[test]
+    fn mixed_system_audio_does_not_build_exclusion_selectors() {
+        let config = RecorderConfig {
+            audio_routes: vec![clip_engine_recorder_protocol::AudioRoute {
+                source_id: "application:discord".into(),
+                track: 2,
+                track_name: String::new(),
+                enabled: true,
+            }],
+            ..RecorderConfig::default()
+        };
+        assert!(system_audio_exclusion_selectors(&config).is_empty());
     }
 
     #[cfg(target_os = "linux")]
