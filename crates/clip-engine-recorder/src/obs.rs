@@ -1378,6 +1378,7 @@ fn prepare_obs_muxer() -> Result<()> {
         "obs-ffmpeg-mux"
     };
     let destination = executable_directory.join(muxer_name);
+    prepare_obs_encoder_helpers(executable_directory)?;
     if destination.is_file() {
         return Ok(());
     }
@@ -1424,6 +1425,64 @@ fn prepare_obs_muxer() -> Result<()> {
                 destination.display()
             )
         })?;
+    }
+    Ok(())
+}
+
+fn prepare_obs_encoder_helpers(executable_directory: &Path) -> Result<()> {
+    let helper_names = if cfg!(windows) {
+        vec!["obs-nvenc-test.exe", "obs-qsv-test.exe"]
+    } else if cfg!(target_os = "linux") {
+        vec!["obs-nvenc-test"]
+    } else {
+        Vec::new()
+    };
+
+    for helper_name in helper_names {
+        let destination = executable_directory.join(helper_name);
+        if destination.is_file() {
+            continue;
+        }
+
+        let mut candidates = Vec::new();
+        if let Some(root) = select_resource_root() {
+            candidates.extend([
+                root.join("bin").join("64bit").join(helper_name),
+                root.join("bin").join(helper_name),
+                root.join(helper_name),
+            ]);
+        }
+        if let Some(path) = env::var_os("PATH") {
+            candidates.extend(env::split_paths(&path).map(|directory| directory.join(helper_name)));
+        }
+        let Some(source) = candidates.iter().find(|candidate| candidate.is_file()) else {
+            continue;
+        };
+
+        if fs::symlink_metadata(&destination).is_ok() {
+            fs::remove_file(&destination)
+                .with_context(|| format!("remove stale {}", destination.display()))?;
+        }
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(source, &destination).with_context(|| {
+                format!(
+                    "link OBS encoder helper {} to {}",
+                    source.display(),
+                    destination.display()
+                )
+            })?;
+        }
+        #[cfg(not(unix))]
+        {
+            fs::copy(source, &destination).with_context(|| {
+                format!(
+                    "copy OBS encoder helper {} to {}",
+                    source.display(),
+                    destination.display()
+                )
+            })?;
+        }
     }
     Ok(())
 }
@@ -1563,41 +1622,45 @@ fn discover_capabilities(
     if !video_encoders
         .iter()
         .any(|encoder| encoder.id.to_ascii_lowercase().contains("nvenc"))
-        && !encoder_plugin_available("obs-nvenc")
     {
-        diagnostics.push(
-            "The OBS runtime does not contain obs-nvenc, so NVIDIA encoders cannot be listed. Rebuild the bundled runtime with the NVENC plugin.".into(),
-        );
+        diagnostics.push(if encoder_plugin_available("obs-nvenc") {
+            "The bundled obs-nvenc plugin is present, but no NVIDIA encoder was exposed. Install or update the NVIDIA driver and verify that libnvidia-encode.so.1 is available.".into()
+        } else {
+            "The OBS runtime does not contain obs-nvenc, so NVIDIA encoders cannot be listed. Rebuild the bundled runtime with the NVENC plugin.".into()
+        });
     }
     if !video_encoders
         .iter()
         .any(|encoder| encoder.id.to_ascii_lowercase().contains("qsv"))
-        && !encoder_plugin_available("obs-qsv11")
     {
-        diagnostics.push(
-            "The OBS runtime does not contain obs-qsv11, so Intel Quick Sync encoders cannot be listed. Rebuild the bundled runtime with the QSV plugin.".into(),
-        );
+        diagnostics.push(if encoder_plugin_available("obs-qsv11") {
+            "The bundled obs-qsv11 plugin is present, but no Intel Quick Sync encoder was exposed. Install or update the Intel graphics driver and ensure the encoder capability-test helper can run.".into()
+        } else {
+            "The OBS runtime does not contain obs-qsv11, so Intel Quick Sync encoders cannot be listed. Rebuild the bundled runtime with the QSV plugin.".into()
+        });
     }
     #[cfg(target_os = "linux")]
     if !video_encoders
         .iter()
         .any(|encoder| encoder.id.to_ascii_lowercase().contains("vaapi"))
-        && !encoder_plugin_available("obs-ffmpeg")
     {
-        diagnostics.push(
-            "The OBS runtime does not contain obs-ffmpeg, so AMD and Intel VAAPI encoders cannot be listed.".into(),
-        );
+        diagnostics.push(if encoder_plugin_available("obs-ffmpeg") {
+            "The bundled obs-ffmpeg plugin is present, but no VAAPI encoder was exposed. Install the matching Mesa/VAAPI driver for the GPU.".into()
+        } else {
+            "The OBS runtime does not contain obs-ffmpeg, so AMD and Intel VAAPI encoders cannot be listed.".into()
+        });
     }
     #[cfg(windows)]
     if !video_encoders
         .iter()
         .any(|encoder| encoder.id.to_ascii_lowercase().contains("amf"))
-        && !encoder_plugin_available("obs-ffmpeg")
     {
-        diagnostics.push(
+        diagnostics.push(if encoder_plugin_available("obs-ffmpeg") {
+            "The bundled obs-ffmpeg plugin is present, but no AMD AMF encoder was exposed. Install or update the AMD graphics driver.".into()
+        } else {
             "The OBS runtime does not contain obs-ffmpeg, so AMD AMF encoders cannot be listed."
-                .into(),
-        );
+                .into()
+        });
     }
     let mut audio_encoders = Vec::new();
     for encoder in context.available_audio_encoders()? {

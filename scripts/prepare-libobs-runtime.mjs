@@ -55,6 +55,7 @@ if (!(await isRuntimeRoot(source))) {
 await pruneDesktopExecutable(source);
 await ensureCapturePlugins(source);
 await ensureEncoderPlugins(source);
+await ensureEncoderHelpers(source);
 await ensureMuxer(source);
 await rm(destination, { recursive: true, force: true });
 await mkdir(dirname(destination), { recursive: true });
@@ -221,6 +222,35 @@ async function ensureCapturePlugins(root) {
         "The bundled recorder requires the platform display and audio capture modules.",
     );
   }
+}
+
+async function ensureEncoderHelpers(root) {
+  const missing = [];
+  for (const requirement of requiredEncoderHelpers()) {
+    if (!(await findFile(root, requirement.fileName))) {
+      missing.push(`${requirement.fileName} (${requirement.purpose})`);
+    }
+  }
+
+  if (missing.length > 0) {
+    throw new Error(
+      `OBS runtime is missing required encoder helpers: ${missing.join(", ")}. ` +
+        "Hardware encoder plugins cannot complete their capability checks without them.",
+    );
+  }
+}
+
+function requiredEncoderHelpers() {
+  if (process.platform === "linux") {
+    return [{ fileName: "obs-nvenc-test", purpose: "NVIDIA NVENC capability check" }];
+  }
+  if (process.platform === "win32") {
+    return [
+      { fileName: "obs-nvenc-test.exe", purpose: "NVIDIA NVENC capability check" },
+      { fileName: "obs-qsv-test.exe", purpose: "Intel Quick Sync capability check" },
+    ];
+  }
+  return [];
 }
 
 function requiredCapturePlugins() {

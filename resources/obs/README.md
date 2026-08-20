@@ -13,6 +13,9 @@ separate AMD encoder module to bundle. Use
 `scripts/prepare-libobs-runtime.mjs` with a checksum-verified archive before
 creating an installer; the repository intentionally does not commit platform
 runtime binaries.
+The runtime also retains the NVENC and Quick Sync capability-test helpers;
+the recorder stages them beside its executable before libobs starts so OBS can
+perform hardware capability detection.
 The Linux preparation step removes the OBS desktop executable because the
 recorder uses libobs directly and does not need the Qt-based OBS frontend. It
 also removes the unused OBS WebSocket module so AppImage packaging does not
