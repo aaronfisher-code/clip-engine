@@ -268,6 +268,10 @@ function requiredCapturePlugins() {
     return [
       { fileName: "win-capture.dll", purpose: "Windows display capture" },
       {
+        fileName: "libobs-winrt.dll",
+        purpose: "Windows Graphics Capture support for multi-adapter displays",
+      },
+      {
         fileName: "win-wasapi.dll",
         purpose: "WASAPI system, microphone, and application audio",
       },

@@ -51,7 +51,7 @@ use windows::{
 };
 
 pub struct ObsBackend {
-    context: ObsContext,
+    context: Option<ObsContext>,
     capabilities: RecorderCapabilities,
     input_types: BTreeSet<String>,
     video_context: VideoContextSettings,
@@ -69,10 +69,7 @@ struct VideoContextSettings {
     fps: Rational,
 }
 
-fn initial_video_context() -> (
-    libobs_wrapper::data::video::ObsVideoInfo,
-    VideoContextSettings,
-) {
+fn initial_video_context() -> VideoContextSettings {
     let displays = DisplayInfo::all().unwrap_or_default();
     let display = displays
         .iter()
@@ -83,16 +80,7 @@ fn initial_video_context() -> (
     let fps = display
         .and_then(display_refresh_rate)
         .unwrap_or_else(|| Rational::new(30, 1));
-    let video_context = VideoContextSettings { width, height, fps };
-    let video_info = libobs_wrapper::data::video::ObsVideoInfoBuilder::new()
-        .fps_num(fps.numerator)
-        .fps_den(fps.denominator)
-        .base_width(width)
-        .base_height(height)
-        .output_width(width)
-        .output_height(height)
-        .build();
-    (video_info, video_context)
+    VideoContextSettings { width, height, fps }
 }
 
 fn display_refresh_rate(display: &DisplayInfo) -> Option<Rational> {
@@ -103,22 +91,34 @@ fn display_refresh_rate(display: &DisplayInfo) -> Option<Rational> {
     })
 }
 
+fn create_obs_context(video_context: VideoContextSettings) -> Result<ObsContext> {
+    let video_info = libobs_wrapper::data::video::ObsVideoInfoBuilder::new()
+        .fps_num(video_context.fps.numerator)
+        .fps_den(video_context.fps.denominator)
+        .base_width(video_context.width)
+        .base_height(video_context.height)
+        .output_width(video_context.width)
+        .output_height(video_context.height)
+        .build();
+    let startup = ObsContext::builder()
+        .set_startup_paths(discover_startup_paths())
+        .set_video_info(video_info)
+        .set_start_glib_loop(true);
+    ObsContext::new(startup).context("initialize libobs")
+}
+
 impl ObsBackend {
     pub fn new() -> Result<Self> {
         prepare_obs_muxer()?;
         check_libobs_version()?;
 
-        let (initial_video_info, video_context) = initial_video_context();
-        let startup = ObsContext::builder()
-            .set_startup_paths(discover_startup_paths())
-            .set_video_info(initial_video_info)
-            .set_start_glib_loop(true);
-        let context = ObsContext::new(startup).context("initialize libobs")?;
+        let video_context = initial_video_context();
+        let context = create_obs_context(video_context)?;
         let input_types = enumerate_input_types(&context)?;
         let capabilities = discover_capabilities(&context, &input_types)?;
 
         Ok(Self {
-            context,
+            context: Some(context),
             capabilities,
             input_types: input_types.into_iter().collect(),
             video_context,
@@ -261,26 +261,11 @@ impl ObsBackend {
             fps: resolved.fps,
         };
         if self.video_context != requested_video_context {
-            // The wrapper initializes video before loading OBS modules. Avoid
-            // an unnecessary second reset for the initial recorder graph:
-            // monitor_capture can otherwise remain at a zero-sized capture
-            // target after the post-module reset.
-            let video_info = libobs_wrapper::data::video::ObsVideoInfoBuilder::new()
-                .fps_num(resolved.fps.numerator)
-                .fps_den(resolved.fps.denominator)
-                .base_width(resolved.output_width)
-                .base_height(resolved.output_height)
-                .output_width(resolved.output_width)
-                .output_height(resolved.output_height)
-                .build();
-            self.context
-                .reset_video(video_info)
-                .context("reset libobs video context")?;
-            self.video_context = requested_video_context;
+            self.restart_context(requested_video_context)?;
         }
 
         let mut scene = self
-            .context
+            .context_mut()
             .scene("Clip Engine Recorder", Some(0))
             .context("create recorder scene")?;
         let screen_source = self
@@ -319,7 +304,7 @@ impl ObsBackend {
         let staging_directory = staging_directory(&config);
         fs::create_dir_all(&staging_directory)
             .with_context(|| format!("create replay directory {}", staging_directory.display()))?;
-        let mut output_settings = self.context.data().context("create replay settings")?;
+        let mut output_settings = self.context().data().context("create replay settings")?;
         output_settings.set_string("directory", path_string(&staging_directory))?;
         output_settings.set_string("format", "clip-engine-replay-%CCYY-%MM-%DD-%hh-%mm-%ss-%r")?;
         output_settings.set_string("extension", config.container_format.as_str())?;
@@ -336,13 +321,13 @@ impl ObsBackend {
             None,
         );
         let mut output = self
-            .context
+            .context_mut()
             .replay_buffer(output_info)
             .context("create replay buffer output")?;
 
         let video_encoder_id = resolved.video_encoder_id.clone();
         let mut video_settings = self
-            .context
+            .context()
             .data()
             .context("create video encoder settings")?;
         let video_capability = self
@@ -359,7 +344,7 @@ impl ObsBackend {
                 Some(video_settings),
                 None,
             ),
-            self.context.runtime().clone(),
+            self.context().runtime().clone(),
         )
         .context("create video encoder")?;
         output
@@ -378,7 +363,7 @@ impl ObsBackend {
                 .select_audio_encoder_builder(&audio_encoder_id)
                 .context("select audio encoder")?;
             let mut audio_settings = self
-                .context
+                .context()
                 .data()
                 .context("create audio encoder settings")?;
             set_int_encoder_property(
@@ -506,6 +491,75 @@ impl ObsBackend {
         })
     }
 
+    fn context(&self) -> &ObsContext {
+        self.context
+            .as_ref()
+            .expect("OBS context is present while the backend is usable")
+    }
+
+    fn context_mut(&mut self) -> &mut ObsContext {
+        self.context
+            .as_mut()
+            .expect("OBS context is present while the backend is usable")
+    }
+
+    fn restart_context(&mut self, video_context: VideoContextSettings) -> Result<()> {
+        // obs_reset_video after win-capture has loaded can leave monitor_capture at
+        // a permanent 0x0 target. Tear the idle graph down and initialize a fresh
+        // context instead, preserving OBS's required reset-video-before-modules order.
+        self.output = None;
+        self.scene = None;
+        self.sources.clear();
+        drop(self.context.take());
+
+        let previous_video_context = self.video_context;
+        let context = match create_obs_context(video_context) {
+            Ok(context) => context,
+            Err(error) => {
+                // Keep the service usable for another ApplyConfig attempt when a
+                // driver rejects the requested mode during reinitialization.
+                if let Ok(context) = create_obs_context(previous_video_context) {
+                    self.context = Some(context);
+                }
+                return Err(error).context("reinitialize libobs video context");
+            }
+        };
+        self.context = Some(context);
+        self.video_context = video_context;
+        let input_types = enumerate_input_types(self.context())?;
+        let capabilities = discover_capabilities(self.context(), &input_types)?;
+        self.input_types = input_types.into_iter().collect();
+        self.capabilities = capabilities;
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    fn wait_for_screen_capture(&self) -> Result<()> {
+        let source = self
+            .sources
+            .first()
+            .context("display capture source is missing")?;
+        let source_ptr = source.as_ptr();
+        let runtime = source.runtime().clone();
+        let deadline = Instant::now() + Duration::from_secs(8);
+        while Instant::now() < deadline {
+            let source_ptr = source_ptr.clone();
+            let (width, height) = runtime.run_with_obs_result(move || unsafe {
+                (
+                    sys::obs_source_get_width(source_ptr.get_ptr()),
+                    sys::obs_source_get_height(source_ptr.get_ptr()),
+                )
+            })?;
+            if width > 0 && height > 0 {
+                return Ok(());
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        anyhow::bail!(
+            "Windows display capture stayed at 0x0. Refresh the display list and verify that libobs-winrt.dll is bundled."
+        )
+    }
+
     fn stop_if_active(&mut self) -> Result<()> {
         if let Some(output) = self.output.as_mut() {
             if output.is_active().context("query replay output state")? {
@@ -627,7 +681,7 @@ impl ObsBackend {
         let (source_id, settings) = match self.capabilities.backend {
             CaptureBackend::WindowsGraphicsCapture => {
                 let mut settings = self
-                    .context
+                    .context()
                     .data()
                     .context("create Windows capture settings")?;
                 let monitor = screen_id.parse::<i64>().unwrap_or(0);
@@ -639,14 +693,17 @@ impl ObsBackend {
                 ("monitor_capture", settings)
             }
             CaptureBackend::X11 => {
-                let mut settings = self.context.data().context("create X11 capture settings")?;
+                let mut settings = self
+                    .context()
+                    .data()
+                    .context("create X11 capture settings")?;
                 settings.set_int("screen", screen_id.parse::<i64>().unwrap_or(0))?;
                 settings.set_bool("show_cursor", true)?;
                 ("xshm_input", settings)
             }
             CaptureBackend::PipeWire => {
                 let mut settings = self
-                    .context
+                    .context()
                     .data()
                     .context("create PipeWire capture settings")?;
                 // OBS opens the portal session on first use. The portal owns the final
@@ -666,7 +723,7 @@ impl ObsBackend {
             "Clip Engine Display",
             Some(settings.into_immutable()),
             None,
-            self.context.runtime().clone(),
+            self.context().runtime().clone(),
         )
         .map_err(Into::into)
     }
@@ -685,7 +742,7 @@ impl ObsBackend {
             );
         }
         let settings_json = pipewire_application_exclusion_settings(selectors).to_string();
-        let settings = ObsData::from_json(&settings_json, self.context.runtime().clone())
+        let settings = ObsData::from_json(&settings_json, self.context().runtime().clone())
             .map_err(|error| anyhow::anyhow!(error.to_string()))
             .context("create PipeWire system audio exclusion settings")?;
         let source = ObsSourceRef::new(
@@ -693,7 +750,7 @@ impl ObsBackend {
             format!("Clip Engine System Audio Track {track} (excluding apps)"),
             Some(settings.into_immutable()),
             None,
-            self.context.runtime().clone(),
+            self.context().runtime().clone(),
         )
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
         Ok((source, track))
@@ -701,7 +758,7 @@ impl ObsBackend {
 
     fn create_audio_source(&self, source_id: &str, track: u8) -> Result<(ObsSourceRef, u8)> {
         let mut settings = self
-            .context
+            .context()
             .data()
             .context("create audio source settings")?;
         let (source_type, name) = if cfg!(windows) {
@@ -811,14 +868,14 @@ impl ObsBackend {
             name,
             Some(settings.into_immutable()),
             None,
-            self.context.runtime().clone(),
+            self.context().runtime().clone(),
         )
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
         Ok((source, track))
     }
 
     fn select_video_encoder(&self, requested: &str) -> Result<String> {
-        let encoders = self.context.available_video_encoders()?;
+        let encoders = self.context().available_video_encoders()?;
         let requested = requested.trim();
         let selected = if requested.is_empty() || requested.eq_ignore_ascii_case("auto") {
             self.capabilities
@@ -844,7 +901,7 @@ impl ObsBackend {
     }
 
     fn select_audio_encoder(&self, requested: &str) -> Result<String> {
-        let encoders = self.context.available_audio_encoders()?;
+        let encoders = self.context().available_audio_encoders()?;
         let requested = requested.trim();
         let selected = if requested.is_empty() || requested.eq_ignore_ascii_case("auto") {
             encoders
@@ -869,7 +926,7 @@ impl ObsBackend {
     }
 
     fn select_audio_encoder_builder(&self, requested: &str) -> Result<ObsAudioEncoderBuilder> {
-        self.context
+        self.context()
             .available_audio_encoders()?
             .into_iter()
             .find(|encoder| {
@@ -884,31 +941,62 @@ impl ObsBackend {
 fn windows_monitor_device_id(screen_id: &str) -> Option<String> {
     use std::{ffi::c_void, mem::size_of};
     use windows_sys::Win32::Graphics::Gdi::{
-        GetMonitorInfoW, HMONITOR, MONITORINFO, MONITORINFOEXW,
+        EnumDisplayDevicesW, GetMonitorInfoW, DISPLAY_DEVICEW, HMONITOR, MONITORINFO,
+        MONITORINFOEXW,
     };
+    use windows_sys::Win32::UI::WindowsAndMessaging::EDD_GET_DEVICE_INTERFACE_NAME;
 
-    if screen_id.starts_with(r"\\.\DISPLAY") {
+    // This is already the interface identifier persisted by OBS itself.
+    if screen_id.starts_with(r"\\?\DISPLAY#") {
         return Some(screen_id.to_owned());
     }
 
-    let handle = screen_id.parse::<usize>().ok()? as *mut c_void as HMONITOR;
-    let mut monitor_info: MONITORINFOEXW = unsafe { std::mem::zeroed() };
-    monitor_info.monitorInfo.cbSize = size_of::<MONITORINFOEXW>() as u32;
-    let monitor_info_ptr = (&mut monitor_info as *mut MONITORINFOEXW).cast::<MONITORINFO>();
-    if unsafe { GetMonitorInfoW(handle, monitor_info_ptr) } == 0 {
-        return None;
+    let device_name = if screen_id.starts_with(r"\\.\DISPLAY") {
+        screen_id.to_owned()
+    } else {
+        // Migrate the numeric HMONITOR identifier used by older configurations.
+        let handle = screen_id.parse::<usize>().ok()? as *mut c_void as HMONITOR;
+        let mut monitor_info: MONITORINFOEXW = unsafe { std::mem::zeroed() };
+        monitor_info.monitorInfo.cbSize = size_of::<MONITORINFOEXW>() as u32;
+        let monitor_info_ptr = (&mut monitor_info as *mut MONITORINFOEXW).cast::<MONITORINFO>();
+        if unsafe { GetMonitorInfoW(handle, monitor_info_ptr) } == 0 {
+            return None;
+        }
+        wide_string(&monitor_info.szDevice)?
+    };
+
+    let device_name_wide = device_name
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let mut display_device: DISPLAY_DEVICEW = unsafe { std::mem::zeroed() };
+    display_device.cb = size_of::<DISPLAY_DEVICEW>() as u32;
+    if unsafe {
+        EnumDisplayDevicesW(
+            device_name_wide.as_ptr(),
+            0,
+            &mut display_device,
+            EDD_GET_DEVICE_INTERFACE_NAME,
+        )
+    } != 0
+    {
+        if let Some(interface_id) = wide_string(&display_device.DeviceID) {
+            return Some(interface_id);
+        }
     }
-    let device_name_end = monitor_info
-        .szDevice
+
+    // OBS 32 falls back to matching the GDI name if interface enumeration fails.
+    Some(device_name)
+}
+
+#[cfg(windows)]
+fn wide_string<const N: usize>(value: &[u16; N]) -> Option<String> {
+    let end = value
         .iter()
         .position(|character| *character == 0)
-        .unwrap_or(monitor_info.szDevice.len());
-    let device_name = String::from_utf16_lossy(&monitor_info.szDevice[..device_name_end]);
-    // OBS accepts the GDI device name (for example, `\\.\DISPLAY1`) through
-    // its fallback monitor matcher. This avoids depending on the interface
-    // ID returned by EnumDisplayDevices being formatted identically in the
-    // recorder and in the OBS capture plugin.
-    (!device_name.is_empty()).then_some(device_name)
+        .unwrap_or(value.len());
+    let value = String::from_utf16_lossy(&value[..end]);
+    (!value.is_empty()).then_some(value)
 }
 
 #[cfg(not(windows))]
@@ -941,13 +1029,11 @@ fn screen_capability_id(display: &DisplayInfo) -> String {
 
 #[cfg(windows)]
 fn screen_capability_label(display: &DisplayInfo) -> String {
-    windows_display_device_label(&display.name).unwrap_or_else(|| {
-        if display.friendly_name.is_empty() {
-            display.name.clone()
-        } else {
-            display.friendly_name.clone()
-        }
-    })
+    if display.friendly_name.is_empty() {
+        display.name.clone()
+    } else {
+        display.friendly_name.clone()
+    }
 }
 
 #[cfg(not(windows))]
@@ -967,28 +1053,6 @@ fn screen_legacy_id(display: &DisplayInfo) -> Option<String> {
 #[cfg(not(windows))]
 fn screen_legacy_id(_display: &DisplayInfo) -> Option<String> {
     None
-}
-
-#[cfg(windows)]
-fn windows_display_device_label(device_name: &str) -> Option<String> {
-    use windows_sys::Win32::Graphics::Gdi::{EnumDisplayDevicesW, DISPLAY_DEVICEW};
-
-    let device_name = device_name
-        .encode_utf16()
-        .chain(std::iter::once(0))
-        .collect::<Vec<_>>();
-    let mut display_device: DISPLAY_DEVICEW = unsafe { std::mem::zeroed() };
-    display_device.cb = std::mem::size_of::<DISPLAY_DEVICEW>() as u32;
-    if unsafe { EnumDisplayDevicesW(device_name.as_ptr(), 0, &mut display_device, 0) } == 0 {
-        return None;
-    }
-    let end = display_device
-        .DeviceString
-        .iter()
-        .position(|character| *character == 0)
-        .unwrap_or(display_device.DeviceString.len());
-    let label = String::from_utf16_lossy(&display_device.DeviceString[..end]);
-    (!label.is_empty()).then_some(label)
 }
 
 struct AppliedVideoSettings {
@@ -1738,6 +1802,14 @@ impl RecorderBackend for ObsBackend {
             self.status.replay_active = false;
             self.status.last_error = Some(error.to_string());
             return Err(error.into());
+        }
+        #[cfg(windows)]
+        if let Err(error) = self.wait_for_screen_capture() {
+            let _ = self.stop_if_active();
+            self.status.state = RecorderState::Error;
+            self.status.replay_active = false;
+            self.status.last_error = Some(error.to_string());
+            return Err(error);
         }
         self.status.state = RecorderState::Running;
         self.status.replay_active = true;

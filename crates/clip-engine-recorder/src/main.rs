@@ -27,9 +27,23 @@ use std::{
 type SharedBackend = Arc<Mutex<Box<dyn RecorderBackend>>>;
 
 fn main() {
+    initialize_platform_capture();
     if let Err(error) = run() {
         eprintln!("clip-engine-recorder: {error:#}");
         std::process::exit(1);
+    }
+}
+
+fn initialize_platform_capture() {
+    #[cfg(windows)]
+    unsafe {
+        // This must happen before display enumeration or libobs startup. Without
+        // per-monitor awareness Windows can report a scaled 4K desktop as
+        // 1920x1080 and win-capture receives mismatched monitor geometry.
+        use windows_sys::Win32::UI::HiDpi::{
+            SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+        };
+        let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     }
 }
 

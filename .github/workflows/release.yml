@@ -357,7 +357,8 @@ jobs:
           CLIP_ENGINE_OBS_ROOT: ${{ github.workspace }}/resources/obs
         run: |
           $env:PATH = "$env:CLIP_ENGINE_OBS_ROOT\bin\64bit;$env:CLIP_ENGINE_OBS_ROOT\bin;$env:PATH"
-          node scripts/smoke-recorder.mjs
+          $env:FFPROBE = Join-Path $env:GITHUB_WORKSPACE "resources\binaries\ffprobe.exe"
+          node scripts/smoke-recorder.mjs --full
       - name: Package
         env:
           CARGO_TARGET_DIR: ${{ github.workspace }}/target

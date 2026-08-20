@@ -219,7 +219,8 @@ The archive must contain the matching `libobs` libraries, OBS plugins, encoders,
 and `data/` tree for that target. The preparation script also fails if the
 platform capture modules are missing: Linux requires `linux-capture.so`,
 `linux-pipewire.so`, and `linux-pulseaudio.so`; Windows requires
-`win-capture.dll` and `win-wasapi.dll`. For the hardware encoder matrix it must
+`win-capture.dll`, `libobs-winrt.dll`, and `win-wasapi.dll`. For the hardware
+encoder matrix it must
 include `obs-ffmpeg.so`, `obs-nvenc.so`, and `obs-qsv11.so` on Linux, or the
 corresponding `.dll` files on Windows. `obs-ffmpeg` contains the replay-buffer
 output, audio encoders, Linux VAAPI, and Windows AMD AMF support; AMD does not

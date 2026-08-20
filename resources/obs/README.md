@@ -5,7 +5,8 @@ OBS data files, capture plugins, encoder plugins, and the `obs-ffmpeg-mux`
 helper. The preparation script verifies the platform capture modules before
 installing the runtime. Linux requires `linux-capture.so`,
 `linux-pipewire.so`, and `linux-pulseaudio.so`; Windows requires
-`win-capture.dll` and `win-wasapi.dll`. Both platforms require
+`win-capture.dll`, `libobs-winrt.dll`, and `win-wasapi.dll`. Both platforms
+require
 `obs-ffmpeg`, `obs-nvenc`, and `obs-qsv11` for the supported encoder matrix.
 `obs-ffmpeg` also provides the replay-buffer output and audio encoders, as well
 as VAAPI encoders on Linux and AMD AMF encoders on Windows, so there is no
