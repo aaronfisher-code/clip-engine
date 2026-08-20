@@ -2775,6 +2775,8 @@ impl ClipApp {
         }
         if response.clicked() {
             self.selected_id = Some(clip_id.clone());
+            self.show_recorder = false;
+            self.recorder_hotkey_listening = false;
         }
         if open_in_explorer {
             self.open_clip_in_file_explorer(&clip_path);
