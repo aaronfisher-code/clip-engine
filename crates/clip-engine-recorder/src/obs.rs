@@ -561,7 +561,7 @@ impl ObsBackend {
                 settings.set_int("monitor", monitor)?;
                 let monitor_id =
                     windows_monitor_device_id(screen_id).unwrap_or_else(|| screen_id.to_owned());
-                settings.set_string("monitor_id", &monitor_id)?;
+                settings.set_string("monitor_id", monitor_id.as_str())?;
                 settings.set_bool("capture_cursor", true)?;
                 ("monitor_capture", settings)
             }
