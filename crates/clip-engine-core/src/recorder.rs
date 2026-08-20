@@ -36,6 +36,8 @@ pub struct RecorderSupervisor {
 
 struct RecorderInner {
     child: Option<Child>,
+    child_stdout: Option<Arc<Mutex<String>>>,
+    child_stdout_thread: Option<thread::JoinHandle<()>>,
     child_stderr: Option<Arc<Mutex<String>>>,
     child_stderr_thread: Option<thread::JoinHandle<()>>,
     stream: Option<LocalSocketStream>,
@@ -54,6 +56,8 @@ impl RecorderSupervisor {
             paths,
             inner: Arc::new(Mutex::new(RecorderInner {
                 child: None,
+                child_stdout: None,
+                child_stdout_thread: None,
                 child_stderr: None,
                 child_stderr_thread: None,
                 stream: None,
@@ -127,9 +131,13 @@ impl RecorderSupervisor {
             let _ = child.kill();
             let _ = child.wait();
         }
+        if let Some(thread) = inner.child_stdout_thread.take() {
+            let _ = thread.join();
+        }
         if let Some(thread) = inner.child_stderr_thread.take() {
             let _ = thread.join();
         }
+        inner.child_stdout = None;
         inner.child_stderr = None;
         inner.status = RecorderStatus::default();
     }
@@ -205,7 +213,7 @@ fn ensure_connected_locked(paths: &AppPaths, inner: &mut RecorderInner) -> Resul
             .arg("--auth-token")
             .arg(&inner.auth_token)
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
+            .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         #[cfg(windows)]
         command.creation_flags(CREATE_NO_WINDOW);
@@ -218,7 +226,10 @@ fn ensure_connected_locked(paths: &AppPaths, inner: &mut RecorderInner) -> Resul
         let mut child = command
             .spawn()
             .with_context(|| format!("launch recorder helper {}", binary.display()))?;
-        let (stderr_log, stderr_thread) = capture_child_stderr(&mut child);
+        let (stdout_log, stdout_thread) = capture_child_output(child.stdout.take());
+        let (stderr_log, stderr_thread) = capture_child_output(child.stderr.take());
+        inner.child_stdout = Some(stdout_log);
+        inner.child_stdout_thread = stdout_thread;
         inner.child_stderr = Some(stderr_log);
         inner.child_stderr_thread = stderr_thread;
         inner.child = Some(child);
@@ -466,13 +477,33 @@ fn with_child_exit_diagnostic(inner: &mut RecorderInner, error: anyhow::Error) -
     if let Ok(Some(child_error)) = exited_child_error(inner) {
         return anyhow::anyhow!("{error:#}; {child_error}");
     }
+    if let Some(output) = child_output_snapshot(inner) {
+        return anyhow::anyhow!("{error:#}; recorder output:\n{output}");
+    }
     error
 }
 
-fn capture_child_stderr(child: &mut Child) -> (Arc<Mutex<String>>, Option<thread::JoinHandle<()>>) {
+fn child_output_snapshot(inner: &RecorderInner) -> Option<String> {
+    let diagnostics = [&inner.child_stdout, &inner.child_stderr]
+        .into_iter()
+        .filter_map(|log| {
+            log.as_ref()
+                .and_then(|log| log.lock().ok().map(|message| message.clone()))
+        })
+        .filter(|message| !message.is_empty())
+        .collect::<Vec<_>>();
+    (!diagnostics.is_empty()).then(|| diagnostics.join("\n"))
+}
+
+fn capture_child_output<R>(
+    output: Option<R>,
+) -> (Arc<Mutex<String>>, Option<thread::JoinHandle<()>>)
+where
+    R: Read + Send + 'static,
+{
     const MAX_DIAGNOSTIC_BYTES: usize = 16 * 1024;
     let log = Arc::new(Mutex::new(String::new()));
-    let Some(mut stderr) = child.stderr.take() else {
+    let Some(mut output) = output else {
         return (log, None);
     };
     let shared_log = Arc::clone(&log);
@@ -480,7 +511,7 @@ fn capture_child_stderr(child: &mut Child) -> (Arc<Mutex<String>>, Option<thread
         let mut captured = Vec::new();
         let mut buffer = [0_u8; 4 * 1024];
         loop {
-            match stderr.read(&mut buffer) {
+            match output.read(&mut buffer) {
                 Ok(0) | Err(_) => break,
                 Ok(read) => {
                     captured.extend_from_slice(&buffer[..read]);
@@ -488,12 +519,11 @@ fn capture_child_stderr(child: &mut Child) -> (Arc<Mutex<String>>, Option<thread
                         let excess = captured.len() - MAX_DIAGNOSTIC_BYTES;
                         captured.drain(..excess);
                     }
+                    if let Ok(mut shared_log) = shared_log.lock() {
+                        *shared_log = String::from_utf8_lossy(&captured).trim().to_string();
+                    }
                 }
             }
-        }
-        let message = String::from_utf8_lossy(&captured).trim().to_string();
-        if let Ok(mut shared_log) = shared_log.lock() {
-            *shared_log = message;
         }
     });
     (log, Some(thread))
@@ -507,19 +537,25 @@ fn exited_child_error(inner: &mut RecorderInner) -> Result<Option<String>> {
         return Ok(None);
     };
     let _child = inner.child.take();
+    if let Some(thread) = inner.child_stdout_thread.take() {
+        let _ = thread.join();
+    }
     if let Some(thread) = inner.child_stderr_thread.take() {
         let _ = thread.join();
     }
-    let diagnostic = inner
-        .child_stderr
-        .take()
-        .and_then(|log| log.lock().ok().map(|message| message.clone()))
-        .filter(|message| !message.is_empty());
-    let message = diagnostic
-        .map(|diagnostic| {
-            format!("The recorder helper exited before accepting IPC ({status}): {diagnostic}")
-        })
-        .unwrap_or_else(|| format!("The recorder helper exited before accepting IPC ({status})."));
+    let diagnostics = [inner.child_stdout.take(), inner.child_stderr.take()]
+        .into_iter()
+        .filter_map(|log| log.and_then(|log| log.lock().ok().map(|message| message.clone())))
+        .filter(|message| !message.is_empty())
+        .collect::<Vec<_>>();
+    let message = if diagnostics.is_empty() {
+        format!("The recorder helper exited before accepting IPC ({status}).")
+    } else {
+        format!(
+            "The recorder helper exited before accepting IPC ({status}):\n{}",
+            diagnostics.join("\n")
+        )
+    };
     Ok(Some(message))
 }
 
@@ -531,6 +567,8 @@ mod tests {
     fn helper_failure_resets_state_for_reconnect() {
         let mut inner = RecorderInner {
             child: None,
+            child_stdout: None,
+            child_stdout_thread: None,
             child_stderr: None,
             child_stderr_thread: None,
             stream: None,
@@ -557,6 +595,8 @@ mod tests {
     fn helper_failure_is_exposed_as_capability_diagnostic() {
         let mut inner = RecorderInner {
             child: None,
+            child_stdout: None,
+            child_stdout_thread: None,
             child_stderr: None,
             child_stderr_thread: None,
             stream: None,
