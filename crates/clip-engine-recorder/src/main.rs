@@ -249,6 +249,7 @@ impl RecorderService {
     fn serve(&mut self, mut stream: LocalSocketStream) -> anyhow::Result<bool> {
         verify_same_user(&stream)?;
         let mut authenticated = false;
+        #[cfg(not(windows))]
         stream
             .set_nonblocking(false)
             .context("set recorder IPC blocking mode")?;

@@ -151,12 +151,14 @@ impl RecorderSupervisor {
                 match send_request_locked(&mut inner, request) {
                     Ok(response) => Ok(response),
                     Err(retry_error) => {
+                        let retry_error = with_child_exit_diagnostic(&mut inner, retry_error);
                         record_connection_error(&mut inner, &retry_error);
                         Err(retry_error)
                     }
                 }
             }
             Err(error) => {
+                let error = with_child_exit_diagnostic(&mut inner, error);
                 record_connection_error(&mut inner, &error);
                 Err(error)
             }
@@ -245,6 +247,7 @@ fn ensure_connected_locked(paths: &AppPaths, inner: &mut RecorderInner) -> Resul
             }
         }
     };
+    #[cfg(not(windows))]
     stream.set_nonblocking(false)?;
     #[cfg(not(windows))]
     {
@@ -457,6 +460,13 @@ fn is_retryable_ipc_error(error: &anyhow::Error) -> bool {
             )
         })
     })
+}
+
+fn with_child_exit_diagnostic(inner: &mut RecorderInner, error: anyhow::Error) -> anyhow::Error {
+    if let Ok(Some(child_error)) = exited_child_error(inner) {
+        return anyhow::anyhow!("{error:#}; {child_error}");
+    }
+    error
 }
 
 fn capture_child_stderr(child: &mut Child) -> (Arc<Mutex<String>>, Option<thread::JoinHandle<()>>) {
