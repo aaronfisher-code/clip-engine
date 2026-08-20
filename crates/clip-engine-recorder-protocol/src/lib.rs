@@ -146,6 +146,10 @@ pub enum SystemAudioMode {
 #[serde(rename_all = "camelCase")]
 pub struct ScreenCapability {
     pub id: String,
+    /// Previous platform-specific identifier retained so saved configurations
+    /// can migrate when the stable display identifier changes.
+    #[serde(default)]
+    pub legacy_id: Option<String>,
     pub label: String,
     pub width: u32,
     pub height: u32,
@@ -655,10 +659,10 @@ impl RecorderCapabilities {
         }
         if !self.screens.is_empty()
             && !config.screen_id.trim().is_empty()
-            && !self
-                .screens
-                .iter()
-                .any(|screen| screen.id == config.screen_id)
+            && !self.screens.iter().any(|screen| {
+                screen.id == config.screen_id
+                    || screen.legacy_id.as_deref() == Some(config.screen_id.as_str())
+            })
         {
             return Err(format!(
                 "The selected screen '{}' is no longer available.",
@@ -725,6 +729,12 @@ impl RecorderCapabilities {
 
     pub fn normalize_config(&self, input: &RecorderConfig) -> RecorderConfig {
         let mut config = input.clone();
+        if let Some(screen) = self.screens.iter().find(|screen| {
+            screen.id == config.screen_id
+                || screen.legacy_id.as_deref() == Some(config.screen_id.as_str())
+        }) {
+            config.screen_id = screen.id.clone();
+        }
         if config.mode != RecorderMode::Advanced {
             return config;
         }

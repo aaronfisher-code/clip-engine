@@ -434,10 +434,10 @@ impl ObsBackend {
         let screen = if config.screen_id.trim().is_empty() {
             self.capabilities.screens.first()
         } else {
-            self.capabilities
-                .screens
-                .iter()
-                .find(|screen| screen.id == config.screen_id)
+            self.capabilities.screens.iter().find(|screen| {
+                screen.id == config.screen_id
+                    || screen.legacy_id.as_deref() == Some(config.screen_id.as_str())
+            })
         };
         let screen_id = screen.map(|screen| screen.id.clone()).unwrap_or_else(|| {
             if config.screen_id.trim().is_empty() {
@@ -887,6 +887,10 @@ fn windows_monitor_device_id(screen_id: &str) -> Option<String> {
         GetMonitorInfoW, HMONITOR, MONITORINFO, MONITORINFOEXW,
     };
 
+    if screen_id.starts_with(r"\\.\DISPLAY") {
+        return Some(screen_id.to_owned());
+    }
+
     let handle = screen_id.parse::<usize>().ok()? as *mut c_void as HMONITOR;
     let mut monitor_info: MONITORINFOEXW = unsafe { std::mem::zeroed() };
     monitor_info.monitorInfo.cbSize = size_of::<MONITORINFOEXW>() as u32;
@@ -919,6 +923,72 @@ struct ResolvedCaptureSettings {
     fps: Rational,
     video_encoder_id: String,
     diagnostics: Vec<String>,
+}
+
+#[cfg(windows)]
+fn screen_capability_id(display: &DisplayInfo) -> String {
+    if display.name.is_empty() {
+        display.id.to_string()
+    } else {
+        display.name.clone()
+    }
+}
+
+#[cfg(not(windows))]
+fn screen_capability_id(display: &DisplayInfo) -> String {
+    display.id.to_string()
+}
+
+#[cfg(windows)]
+fn screen_capability_label(display: &DisplayInfo) -> String {
+    windows_display_device_label(&display.name).unwrap_or_else(|| {
+        if display.friendly_name.is_empty() {
+            display.name.clone()
+        } else {
+            display.friendly_name.clone()
+        }
+    })
+}
+
+#[cfg(not(windows))]
+fn screen_capability_label(display: &DisplayInfo) -> String {
+    if display.friendly_name.is_empty() {
+        display.name.clone()
+    } else {
+        display.friendly_name.clone()
+    }
+}
+
+#[cfg(windows)]
+fn screen_legacy_id(display: &DisplayInfo) -> Option<String> {
+    Some(display.id.to_string())
+}
+
+#[cfg(not(windows))]
+fn screen_legacy_id(_display: &DisplayInfo) -> Option<String> {
+    None
+}
+
+#[cfg(windows)]
+fn windows_display_device_label(device_name: &str) -> Option<String> {
+    use windows_sys::Win32::Graphics::Gdi::{EnumDisplayDevicesW, DISPLAY_DEVICEW};
+
+    let device_name = device_name
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let mut display_device: DISPLAY_DEVICEW = unsafe { std::mem::zeroed() };
+    display_device.cb = std::mem::size_of::<DISPLAY_DEVICEW>() as u32;
+    if unsafe { EnumDisplayDevicesW(device_name.as_ptr(), 0, &mut display_device, 0) } == 0 {
+        return None;
+    }
+    let end = display_device
+        .DeviceString
+        .iter()
+        .position(|character| *character == 0)
+        .unwrap_or(display_device.DeviceString.len());
+    let label = String::from_utf16_lossy(&display_device.DeviceString[..end]);
+    (!label.is_empty()).then_some(label)
 }
 
 struct AppliedVideoSettings {
@@ -1726,17 +1796,17 @@ fn discover_capabilities(
     let screens = DisplayInfo::all()
         .unwrap_or_default()
         .into_iter()
-        .map(|display| ScreenCapability {
-            id: display.id.to_string(),
-            label: if display.friendly_name.is_empty() {
-                display.name
-            } else {
-                display.friendly_name
-            },
-            width: display.width,
-            height: display.height,
-            refresh_hz: (display.frequency > 0.0).then_some(f64::from(display.frequency)),
-            backend: detect_backend(input_types).0,
+        .map(|display| {
+            let label = screen_capability_label(&display);
+            ScreenCapability {
+                id: screen_capability_id(&display),
+                legacy_id: screen_legacy_id(&display),
+                label,
+                width: display.width,
+                height: display.height,
+                refresh_hz: (display.frequency > 0.0).then_some(f64::from(display.frequency)),
+                backend: detect_backend(input_types).0,
+            }
         })
         .collect::<Vec<_>>();
     let (backend, mut diagnostics) = detect_backend(input_types);
