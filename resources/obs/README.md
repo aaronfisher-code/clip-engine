@@ -19,9 +19,12 @@ Release packages place them beside the recorder executable, while development
 launches stage them there before libobs starts so OBS can perform hardware
 capability detection.
 The Linux preparation step removes the OBS desktop executable because the
-recorder uses libobs directly and does not need the Qt-based OBS frontend. It
-also removes the unused OBS WebSocket module so AppImage packaging does not
-introduce its optional QR-code library dependency.
+recorder uses libobs directly and does not need the Qt-based OBS frontend. The
+runtime preparation also removes the unused OBS WebSocket and Browser modules.
+The Browser module starts CEF and relies on frontend callbacks that are not
+available to the recorder; leaving it in the plugin directory can crash a
+Wayland helper during startup. Removing it also prevents CEF support libraries
+from being probed as OBS plugins.
 
 The desktop application launches its bundled recorder helper with this runtime;
 end users do not need to install OBS Studio separately. Hardware encoder

@@ -53,6 +53,7 @@ if (!(await isRuntimeRoot(source))) {
   throw new Error("OBS runtime could not be normalized to a supported layout");
 }
 await pruneDesktopExecutable(source);
+await pruneRecorderIncompatibleModules(source);
 await ensureCapturePlugins(source);
 await ensureEncoderPlugins(source);
 await ensureEncoderHelpers(source);
@@ -174,6 +175,67 @@ async function pruneDesktopExecutable(root) {
     join(root, "data", "obs-plugins", "obs-websocket"),
   ]) {
     await rm(dataPath, { recursive: true, force: true });
+  }
+}
+
+async function pruneRecorderIncompatibleModules(root) {
+  // The recorder embeds libobs without the OBS desktop frontend. The browser
+  // module assumes that frontend API and starts CEF during module loading.
+  // Loading it in this standalone process can crash the helper before IPC
+  // starts, especially under Wayland.
+  // Its shared libraries also live in obs-plugins/, where libobs scans every
+  // .so as a possible module.
+  const browserFiles = new Set([
+    "obs-browser.so",
+    "obs-browser.dll",
+    "libcef.so",
+    "libcef.dll",
+    "libEGL.so",
+    "libEGL.dll",
+    "libGLESv2.so",
+    "libGLESv2.dll",
+    "libvk_swiftshader.so",
+    "libvk_swiftshader.dll",
+    "libvulkan.so.1",
+    "icudtl.dat",
+    "v8_context_snapshot.bin",
+    "snapshot_blob.bin",
+    "natives_blob.bin",
+    "resources.pak",
+    "cef.pak",
+    "chrome_100_percent.pak",
+    "chrome_200_percent.pak",
+    "vk_swiftshader_icd.json",
+    "obs-browser-page",
+    "obs-browser-page.exe",
+    "chrome-sandbox",
+  ]);
+  const browserDirectories = [
+    join(root, "obs-plugins"),
+    join(root, "obs-plugins", "64bit"),
+    join(root, "lib", "obs-plugins"),
+    join(root, "bin", "64bit"),
+  ];
+  for (const directory of browserDirectories) {
+    await removeNamedEntries(directory, browserFiles);
+  }
+  for (const dataPath of [
+    join(root, "data", "obs-plugins", "obs-browser"),
+    join(root, "share", "obs", "obs-plugins", "obs-browser"),
+  ]) {
+    await rm(dataPath, { recursive: true, force: true });
+  }
+}
+
+async function removeNamedEntries(directory, names) {
+  if (!(await isDirectory(directory))) return;
+  for (const entry of await readdir(directory, { withFileTypes: true })) {
+    const path = join(directory, entry.name);
+    if (names.has(entry.name)) {
+      await rm(path, { recursive: true, force: true });
+    } else if (entry.isDirectory() && !entry.isSymbolicLink()) {
+      await removeNamedEntries(path, names);
+    }
   }
 }
 
