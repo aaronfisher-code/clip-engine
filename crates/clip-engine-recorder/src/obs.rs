@@ -2875,17 +2875,6 @@ fn discover_startup_paths() -> StartupPaths {
     #[cfg(target_os = "linux")]
     {
         if let Some(root) = select_resource_root() {
-            if linked_libobs_owns_runtime_paths(&root) {
-                // A locally installed libobs already registers its compiled-in
-                // module and data paths during obs_startup. Adding the same
-                // directory through the wrapper causes OBS 32 to initialize
-                // every module twice and corrupt its teardown state.
-                return StartupPaths::new(
-                    ObsPath::new("/dev/null/clip-engine-libobs-data"),
-                    ObsPath::new("/dev/null/clip-engine-obs-plugins"),
-                    ObsPath::new("/dev/null/clip-engine-obs-plugins/%module%"),
-                );
-            }
             let standard_layout = root.join("lib").join("obs-plugins").is_dir()
                 && root.join("share").join("obs").is_dir();
             let libobs_data = if standard_layout {
@@ -2893,15 +2882,28 @@ fn discover_startup_paths() -> StartupPaths {
             } else {
                 root.join("data").join("libobs")
             };
-            let plugin_bin = if standard_layout {
-                root.join("lib").join("obs-plugins")
-            } else {
-                root.join("obs-plugins")
-            };
             let plugin_data = if standard_layout {
                 root.join("share").join("obs").join("obs-plugins")
             } else {
                 root.join("data").join("obs-plugins")
+            };
+            if linked_libobs_owns_runtime_paths(&root) {
+                // A locally installed libobs already registers its compiled-in
+                // module path during obs_startup. Adding the same directory
+                // through the wrapper causes OBS 32 to initialize every module
+                // twice and corrupt its teardown state. Keep the bundled data
+                // paths here because the compiled-in data path may point to a
+                // different prefix in CI or a packaged runtime.
+                return StartupPaths::new(
+                    ObsPath::new(&path_string(&libobs_data)),
+                    ObsPath::new("/dev/null/clip-engine-obs-plugins"),
+                    ObsPath::new(&path_string(&plugin_data.join("%module%"))),
+                );
+            }
+            let plugin_bin = if standard_layout {
+                root.join("lib").join("obs-plugins")
+            } else {
+                root.join("obs-plugins")
             };
             let required_plugins = ["obs-ffmpeg", "obs-nvenc", "obs-qsv11"];
             let use_system_plugins = cfg!(debug_assertions)
@@ -2953,10 +2955,16 @@ fn linked_libobs_owns_runtime_paths(root: &Path) -> bool {
     let Ok(linked_libobs_path) = PathBuf::from(linked_libobs_path).canonicalize() else {
         return false;
     };
-    let Ok(runtime_lib_path) = root.join("lib").canonicalize() else {
+    let Ok(runtime_plugin_path) = root.join("lib").join("obs-plugins").canonicalize() else {
         return false;
     };
-    linked_libobs_path == runtime_lib_path
+    let Ok(libobs_binary) = fs::read(linked_libobs_path.join("libobs.so")) else {
+        return false;
+    };
+    let runtime_plugin_path = runtime_plugin_path.to_string_lossy();
+    libobs_binary
+        .windows(runtime_plugin_path.len())
+        .any(|window| window == runtime_plugin_path.as_bytes())
 }
 
 fn output_directory(config: &RecorderConfig) -> PathBuf {
