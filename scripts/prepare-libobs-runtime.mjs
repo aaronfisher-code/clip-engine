@@ -162,6 +162,18 @@ async function pruneDesktopExecutable(root) {
   if (process.platform !== "linux") return;
   await rm(join(root, "bin", "obs"), { force: true });
   await rm(join(root, "obs"), { force: true });
+  for (const pluginPath of [
+    join(root, "lib", "obs-plugins", "obs-websocket.so"),
+    join(root, "obs-plugins", "obs-websocket.so"),
+  ]) {
+    await rm(pluginPath, { force: true });
+  }
+  for (const dataPath of [
+    join(root, "share", "obs", "obs-plugins", "obs-websocket"),
+    join(root, "data", "obs-plugins", "obs-websocket"),
+  ]) {
+    await rm(dataPath, { recursive: true, force: true });
+  }
 }
 
 async function ensureEncoderPlugins(root) {

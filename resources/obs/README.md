@@ -14,7 +14,9 @@ separate AMD encoder module to bundle. Use
 creating an installer; the repository intentionally does not commit platform
 runtime binaries.
 The Linux preparation step removes the OBS desktop executable because the
-recorder uses libobs directly and does not need the Qt-based OBS frontend.
+recorder uses libobs directly and does not need the Qt-based OBS frontend. It
+also removes the unused OBS WebSocket module so AppImage packaging does not
+introduce its optional QR-code library dependency.
 
 The desktop application launches its bundled recorder helper with this runtime;
 end users do not need to install OBS Studio separately. Hardware encoder
