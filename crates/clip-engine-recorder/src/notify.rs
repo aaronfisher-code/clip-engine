@@ -3,6 +3,9 @@ use std::path::Path;
 #[cfg(not(test))]
 const APP_NAME: &str = "Clip Engine";
 
+#[cfg(all(not(test), windows))]
+const APP_ID: &str = "dev.dab.clip-engine";
+
 pub fn replay_saved(path: &Path, duration_seconds: u32) {
     show("Replay saved", &saved_body(path, duration_seconds), false);
 }
@@ -55,6 +58,12 @@ fn build_notification(
 
 #[cfg(not(test))]
 fn apply_platform_hints(notification: &mut notify_rust::Notification, error: bool) {
+    #[cfg(windows)]
+    {
+        // Match the AppUserModelID registered by the Windows installer so
+        // notifications are attributed to Clip Engine instead of PowerShell.
+        notification.app_id(APP_ID);
+    }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
         notification.urgency(if error {
