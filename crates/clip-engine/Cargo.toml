@@ -64,6 +64,9 @@ icons = [
 resources = [
   { src = "../../resources/binaries", target = "binaries" },
   { src = "../../target/release/clip-engine-recorder*", target = "binaries" },
+  { src = "../../resources/obs/bin/obs-nvenc-test*", target = "binaries" },
+  { src = "../../resources/obs/bin/64bit/obs-nvenc-test*", target = "binaries" },
+  { src = "../../resources/obs/bin/64bit/obs-qsv-test*", target = "binaries" },
   { src = "../../resources/obs/bin/obs-ffmpeg-mux*", target = "binaries" },
   { src = "../../resources/obs/bin/64bit/obs-ffmpeg-mux*", target = "binaries" },
   { src = "../../resources/obs", target = "obs" },

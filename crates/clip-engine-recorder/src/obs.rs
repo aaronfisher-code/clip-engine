@@ -1460,31 +1460,51 @@ fn prepare_obs_encoder_helpers(executable_directory: &Path) -> Result<()> {
         };
 
         if fs::symlink_metadata(&destination).is_ok() {
-            fs::remove_file(&destination)
-                .with_context(|| format!("remove stale {}", destination.display()))?;
+            if let Err(error) = fs::remove_file(&destination) {
+                if is_read_only_filesystem_error(&error) {
+                    eprintln!(
+                        "OBS encoder helper {helper_name} cannot be staged on a read-only filesystem; \
+                         package it beside the recorder executable"
+                    );
+                    continue;
+                }
+                return Err(anyhow::Error::new(error)
+                    .context(format!("remove stale {}", destination.display())));
+            }
         }
-        #[cfg(unix)]
-        {
-            std::os::unix::fs::symlink(source, &destination).with_context(|| {
-                format!(
-                    "link OBS encoder helper {} to {}",
-                    source.display(),
-                    destination.display()
-                )
-            })?;
-        }
-        #[cfg(not(unix))]
-        {
-            fs::copy(source, &destination).with_context(|| {
-                format!(
-                    "copy OBS encoder helper {} to {}",
-                    source.display(),
-                    destination.display()
-                )
-            })?;
+        let stage_result: std::io::Result<()> = {
+            #[cfg(unix)]
+            {
+                std::os::unix::fs::symlink(source, &destination)
+            }
+            #[cfg(not(unix))]
+            {
+                fs::copy(source, &destination).map(|_| ())
+            }
+        };
+        if let Err(error) = stage_result {
+            if is_read_only_filesystem_error(&error) {
+                eprintln!(
+                    "OBS encoder helper {helper_name} cannot be staged on a read-only filesystem; \
+                     package it beside the recorder executable"
+                );
+                continue;
+            }
+            return Err(anyhow::Error::new(error).context(format!(
+                "stage OBS encoder helper {} beside {}",
+                source.display(),
+                destination.display()
+            )));
         }
     }
     Ok(())
+}
+
+fn is_read_only_filesystem_error(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::ReadOnlyFilesystem
+    )
 }
 
 fn check_libobs_version() -> Result<()> {
