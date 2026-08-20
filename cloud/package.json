@@ -1,6 +1,6 @@
 {
   "name": "@clip-engine/cloud",
-  "version": "1.1.11",
+  "version": "1.1.12",
   "private": true,
   "type": "module",
   "scripts": {
@@ -10,7 +10,7 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@clip-engine/contracts": "1.1.11"
+    "@clip-engine/contracts": "1.1.12"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20260815.1",
