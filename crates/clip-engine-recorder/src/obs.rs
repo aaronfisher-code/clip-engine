@@ -508,8 +508,12 @@ impl ObsBackend {
         anyhow::bail!("timed out waiting for OBS to stop the replay buffer")
     }
 
-    fn save_replay_buffer(output: &ObsReplayBufferOutputRef) -> Result<PathBuf> {
+    fn save_replay_buffer(
+        output: &ObsReplayBufferOutputRef,
+        replay_seconds: u32,
+    ) -> Result<PathBuf> {
         let mut saved_signals = output.replay_signals().on_saved()?;
+        let mut stop_signals = output.signals().on_stop()?;
         let output_ptr = output.as_ptr();
         let runtime = output.runtime().clone();
         let proc_handler = runtime
@@ -531,13 +535,25 @@ impl ObsBackend {
                 .context("call replay buffer save procedure")?;
         }
 
-        let deadline = Instant::now() + Duration::from_secs(10);
+        // OBS must wait for the next encoded packet, then mux the complete
+        // replay buffer on a worker thread before emitting "saved". Allow at
+        // least one minute for slow disks, antivirus scans, and long replays.
+        let save_timeout_seconds = u64::from(replay_seconds).saturating_add(30).max(60);
+        let deadline = Instant::now() + Duration::from_secs(save_timeout_seconds);
         loop {
             if saved_signals.try_recv().is_ok() {
                 break;
             }
+            if let Ok(stop_signal) = stop_signals.try_recv() {
+                if stop_signal != ObsOutputStopSignal::Success {
+                    anyhow::bail!("OBS stopped the replay buffer before saving ({stop_signal})");
+                }
+                anyhow::bail!("OBS stopped the replay buffer before saving the replay");
+            }
             if Instant::now() >= deadline {
-                anyhow::bail!("timed out waiting for OBS to save the replay buffer");
+                anyhow::bail!(
+                    "timed out waiting for OBS to save the replay buffer after {save_timeout_seconds}s"
+                );
             }
             thread::sleep(Duration::from_millis(10));
         }
@@ -1659,7 +1675,8 @@ impl ObsBackend {
             .context("recorder configuration is missing")?
             .clone();
         let output = self.output.as_ref().context("replay output is missing")?;
-        let source_path = Self::save_replay_buffer(output).context("save replay buffer")?;
+        let source_path = Self::save_replay_buffer(output, config.replay_seconds)
+            .context("save replay buffer")?;
         let source_path = wait_for_stable_file(&source_path)?;
         let destination_directory = output_directory(&config);
         let destination = handoff_replay(&source_path, &destination_directory)?;
