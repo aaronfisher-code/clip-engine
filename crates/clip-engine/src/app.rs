@@ -980,18 +980,6 @@ impl eframe::App for ClipApp {
                                 .size(11.5),
                         );
                     });
-                    if ui
-                        .selectable_label(self.show_recorder, "Recorder")
-                        .on_hover_text("Configure and control the libobs replay recorder")
-                        .clicked()
-                    {
-                        self.show_recorder = !self.show_recorder;
-                        if self.show_recorder {
-                            self.refresh_recorder();
-                        } else {
-                            self.recorder_hotkey_listening = false;
-                        }
-                    }
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         let label = if self.config.authenticated {
                             self.user
@@ -1027,21 +1015,16 @@ impl eframe::App for ClipApp {
                                 ))
                             });
                         }
-                        let update_label = if self.available_update.is_some() {
-                            "Update available"
-                        } else if self.update_checking {
-                            "Checking…"
-                        } else {
-                            "Check for updates"
-                        };
                         if ui
-                            .add_enabled(!self.update_checking, egui::Button::new(update_label))
+                            .button("Recorder")
+                            .on_hover_text("Configure and control the libobs replay recorder")
                             .clicked()
                         {
-                            if self.available_update.is_some() {
-                                self.update_modal = Some(UpdateModal::Prompt);
+                            self.show_recorder = !self.show_recorder;
+                            if self.show_recorder {
+                                self.refresh_recorder();
                             } else {
-                                self.schedule_update_check(true);
+                                self.recorder_hotkey_listening = false;
                             }
                         }
                     });
@@ -1055,6 +1038,23 @@ impl eframe::App for ClipApp {
                             );
                             if ui.button("Sign out this device").clicked() {
                                 self.sign_out_this_device();
+                            }
+                            let update_label = if self.available_update.is_some() {
+                                "Update available"
+                            } else if self.update_checking {
+                                "Checking…"
+                            } else {
+                                "Check for updates"
+                            };
+                            if ui
+                                .add_enabled(!self.update_checking, egui::Button::new(update_label))
+                                .clicked()
+                            {
+                                if self.available_update.is_some() {
+                                    self.update_modal = Some(UpdateModal::Prompt);
+                                } else {
+                                    self.schedule_update_check(true);
+                                }
                             }
                         });
                     }
