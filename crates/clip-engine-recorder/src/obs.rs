@@ -2305,8 +2305,16 @@ fn discover_capabilities(
     })
 }
 
-fn enumerate_screen_capabilities(input_types: &[String]) -> Result<Vec<ScreenCapability>> {
-    let backend = detect_backend(input_types).0;
+fn enumerate_screen_capabilities<I, S>(input_types: I) -> Result<Vec<ScreenCapability>>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let input_types = input_types
+        .into_iter()
+        .map(|input_type| input_type.as_ref().to_owned())
+        .collect::<Vec<_>>();
+    let backend = detect_backend(&input_types).0;
     let mut displays = DisplayInfo::all().map_err(|error| anyhow::anyhow!(error.to_string()))?;
     displays.sort_by_key(|display| !display.is_primary);
     Ok(displays
