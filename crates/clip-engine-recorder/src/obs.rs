@@ -554,7 +554,7 @@ impl ObsBackend {
     }
 
     #[cfg(windows)]
-    fn wait_for_screen_capture(&self) -> Result<()> {
+    fn wait_for_screen_capture(&mut self) -> Result<()> {
         let source = self
             .sources
             .first()
