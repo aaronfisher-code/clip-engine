@@ -84,7 +84,7 @@ fn initial_video_context() -> VideoContextSettings {
 }
 
 fn display_refresh_rate(display: &DisplayInfo) -> Option<Rational> {
-    let refresh = f64::from(display.frequency);
+    let refresh = screen_refresh_hz(display)?;
     (refresh.is_finite() && refresh > 0.0).then(|| {
         let refresh = refresh.min(240.0);
         Rational::new((refresh * 1_000.0).round() as u32, 1_000)
@@ -132,6 +132,16 @@ impl ObsBackend {
 
     fn refreshed_capabilities(&self) -> RecorderCapabilities {
         let mut capabilities = self.capabilities.clone();
+        capabilities.diagnostics.retain(|diagnostic| {
+            !diagnostic.starts_with("Display enumeration failed")
+                && !diagnostic.starts_with("Display list refresh failed")
+        });
+        match enumerate_screen_capabilities(&self.input_types) {
+            Ok(screens) => capabilities.screens = screens,
+            Err(error) => capabilities.diagnostics.push(format!(
+                "Display list refresh failed; retaining the previous display list: {error:#}"
+            )),
+        }
         capabilities
             .audio_sources
             .retain(|source| source.kind != AudioSourceKind::Application);
@@ -241,6 +251,16 @@ impl ObsBackend {
     }
 
     fn rebuild_graph(&mut self, requested_config: &RecorderConfig) -> Result<()> {
+        self.capabilities.diagnostics.retain(|diagnostic| {
+            !diagnostic.starts_with("Display enumeration failed")
+                && !diagnostic.starts_with("Display list refresh failed")
+        });
+        match enumerate_screen_capabilities(&self.input_types) {
+            Ok(screens) => self.capabilities.screens = screens,
+            Err(error) => self.capabilities.diagnostics.push(format!(
+                "Display list refresh failed; retaining the previous display list: {error:#}"
+            )),
+        }
         let requested_config = self
             .capabilities
             .normalize_config(&requested_config.clone().normalize());
@@ -551,6 +571,14 @@ impl ObsBackend {
                 )
             })?;
             if width > 0 && height > 0 {
+                if let Some(effective) = self.status.effective_settings.as_mut() {
+                    let diagnostic = format!(
+                        "Windows capture source initialized at {width}x{height}; WGC was requested with SDR output and OBS may fall back to DXGI when WGC is unavailable."
+                    );
+                    if !effective.diagnostics.iter().any(|item| item == &diagnostic) {
+                        effective.diagnostics.push(diagnostic);
+                    }
+                }
                 return Ok(());
             }
             thread::sleep(Duration::from_millis(50));
@@ -684,12 +712,18 @@ impl ObsBackend {
                     .context()
                     .data()
                     .context("create Windows capture settings")?;
-                let monitor = screen_id.parse::<i64>().unwrap_or(0);
+                let monitor = windows_monitor_index(screen_id);
                 settings.set_int("monitor", monitor)?;
                 let monitor_id =
                     windows_monitor_device_id(screen_id).unwrap_or_else(|| screen_id.to_owned());
                 settings.set_string("monitor_id", monitor_id.as_str())?;
                 settings.set_bool("capture_cursor", true)?;
+                // OBS's automatic choice commonly selects DXGI for a physical
+                // monitor and WGC for an RDP monitor. Prefer WGC here because
+                // it handles local HDR, hybrid-GPU, and high-refresh displays
+                // more reliably. OBS falls back to DXGI when WGC is unavailable.
+                settings.set_int("method", 2)?;
+                settings.set_bool("force_sdr", true)?;
                 ("monitor_capture", settings)
             }
             CaptureBackend::X11 => {
@@ -1004,6 +1038,32 @@ fn windows_monitor_device_id(_screen_id: &str) -> Option<String> {
     None
 }
 
+#[cfg(windows)]
+fn windows_monitor_index(screen_id: &str) -> i64 {
+    if let Ok(index) = screen_id.parse::<i64>() {
+        return index;
+    }
+
+    if let Some(index) = DisplayInfo::all().ok().and_then(|displays| {
+        displays
+            .iter()
+            .position(|display| display.name == screen_id)
+    }) {
+        return index as i64;
+    }
+
+    screen_id
+        .strip_prefix(r"\\.\DISPLAY")
+        .and_then(|value| value.parse::<i64>().ok())
+        .map(|value| value.saturating_sub(1))
+        .unwrap_or(0)
+}
+
+#[cfg(not(windows))]
+fn windows_monitor_index(_screen_id: &str) -> i64 {
+    0
+}
+
 struct ResolvedCaptureSettings {
     screen_id: String,
     output_width: u32,
@@ -1029,10 +1089,33 @@ fn screen_capability_id(display: &DisplayInfo) -> String {
 
 #[cfg(windows)]
 fn screen_capability_label(display: &DisplayInfo) -> String {
-    if display.friendly_name.is_empty() {
-        display.name.clone()
-    } else {
-        display.friendly_name.clone()
+    let device_label = windows_display_device_label(&display.name);
+    let candidates = [
+        display.friendly_name.as_str(),
+        device_label.as_deref().unwrap_or_default(),
+        display.name.as_str(),
+    ];
+    candidates
+        .iter()
+        .find(|candidate| !is_placeholder_display_label(candidate))
+        .or_else(|| {
+            candidates
+                .iter()
+                .find(|candidate| !candidate.trim().is_empty())
+        })
+        .map(|candidate| (*candidate).to_string())
+        .unwrap_or_else(|| format!("Display {}", display.id))
+}
+
+fn screen_refresh_hz(display: &DisplayInfo) -> Option<f64> {
+    #[cfg(windows)]
+    {
+        windows_active_signal_refresh_hz(&display.name)
+            .or_else(|| display_frequency_hz_fallback(display))
+    }
+    #[cfg(not(windows))]
+    {
+        display_frequency_hz_fallback(display)
     }
 }
 
@@ -1045,6 +1128,11 @@ fn screen_capability_label(display: &DisplayInfo) -> String {
     }
 }
 
+fn display_frequency_hz_fallback(display: &DisplayInfo) -> Option<f64> {
+    let refresh = f64::from(display.frequency);
+    (refresh.is_finite() && refresh > 0.0).then_some(refresh)
+}
+
 #[cfg(windows)]
 fn screen_legacy_id(display: &DisplayInfo) -> Option<String> {
     Some(display.id.to_string())
@@ -1052,6 +1140,118 @@ fn screen_legacy_id(display: &DisplayInfo) -> Option<String> {
 
 #[cfg(not(windows))]
 fn screen_legacy_id(_display: &DisplayInfo) -> Option<String> {
+    None
+}
+
+#[cfg(windows)]
+fn windows_display_device_label(device_name: &str) -> Option<String> {
+    use windows_sys::Win32::Graphics::Gdi::{EnumDisplayDevicesW, DISPLAY_DEVICEW};
+
+    if device_name.trim().is_empty() {
+        return None;
+    }
+    let device_name = device_name
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let mut display_device: DISPLAY_DEVICEW = unsafe { std::mem::zeroed() };
+    display_device.cb = std::mem::size_of::<DISPLAY_DEVICEW>() as u32;
+    if unsafe { EnumDisplayDevicesW(device_name.as_ptr(), 0, &mut display_device, 0) } == 0 {
+        return None;
+    }
+    let end = display_device
+        .DeviceString
+        .iter()
+        .position(|character| *character == 0)
+        .unwrap_or(display_device.DeviceString.len());
+    let label = String::from_utf16_lossy(&display_device.DeviceString[..end]);
+    (!label.trim().is_empty()).then_some(label)
+}
+
+#[cfg(windows)]
+fn is_placeholder_display_label(value: &str) -> bool {
+    let value = value.trim().to_ascii_lowercase();
+    value.is_empty()
+        || value == "generic pnp monitor"
+        || value.starts_with("unknown display ")
+        || value.starts_with(r"\\.\display")
+}
+
+#[cfg(windows)]
+fn windows_active_signal_refresh_hz(gdi_name: &str) -> Option<f64> {
+    use windows_sys::Win32::{
+        Devices::Display::{
+            DisplayConfigGetDeviceInfo, GetDisplayConfigBufferSizes, QueryDisplayConfig,
+            DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME, DISPLAYCONFIG_DEVICE_INFO_HEADER,
+            DISPLAYCONFIG_MODE_INFO, DISPLAYCONFIG_PATH_INFO, DISPLAYCONFIG_SOURCE_DEVICE_NAME,
+            QDC_ONLY_ACTIVE_PATHS,
+        },
+        Foundation::{ERROR_INSUFFICIENT_BUFFER, ERROR_SUCCESS},
+    };
+
+    if gdi_name.trim().is_empty() {
+        return None;
+    }
+
+    for _ in 0..3 {
+        let mut path_count = 0u32;
+        let mut mode_count = 0u32;
+        let status = unsafe {
+            GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &mut path_count, &mut mode_count)
+        };
+        if status != ERROR_SUCCESS || path_count == 0 {
+            return None;
+        }
+
+        let mut paths =
+            vec![unsafe { std::mem::zeroed::<DISPLAYCONFIG_PATH_INFO>() }; path_count as usize];
+        let mut modes =
+            vec![unsafe { std::mem::zeroed::<DISPLAYCONFIG_MODE_INFO>() }; mode_count as usize];
+        let status = unsafe {
+            QueryDisplayConfig(
+                QDC_ONLY_ACTIVE_PATHS,
+                &mut path_count,
+                paths.as_mut_ptr(),
+                &mut mode_count,
+                modes.as_mut_ptr(),
+                std::ptr::null_mut(),
+            )
+        };
+        if status == ERROR_INSUFFICIENT_BUFFER {
+            continue;
+        }
+        if status != ERROR_SUCCESS {
+            return None;
+        }
+
+        let path_count = (path_count as usize).min(paths.len());
+        paths.truncate(path_count);
+        for path in paths {
+            let mut source_name: DISPLAYCONFIG_SOURCE_DEVICE_NAME = unsafe { std::mem::zeroed() };
+            source_name.header = DISPLAYCONFIG_DEVICE_INFO_HEADER {
+                r#type: DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME,
+                size: std::mem::size_of::<DISPLAYCONFIG_SOURCE_DEVICE_NAME>() as u32,
+                adapterId: path.sourceInfo.adapterId,
+                id: path.sourceInfo.id,
+            };
+            if unsafe { DisplayConfigGetDeviceInfo(&mut source_name.header) } != 0 {
+                continue;
+            }
+            if wide_string(&source_name.viewGdiDeviceName).as_deref() != Some(gdi_name) {
+                continue;
+            }
+
+            let refresh = path.targetInfo.refreshRate;
+            if refresh.Denominator == 0 {
+                return None;
+            }
+            let refresh = f64::from(refresh.Numerator) / f64::from(refresh.Denominator);
+            if refresh.is_finite() && refresh > 0.0 {
+                return Some(refresh);
+            }
+        }
+        return None;
+    }
     None
 }
 
@@ -1865,23 +2065,14 @@ fn discover_capabilities(
     context: &ObsContext,
     input_types: &[String],
 ) -> Result<RecorderCapabilities> {
-    let screens = DisplayInfo::all()
-        .unwrap_or_default()
-        .into_iter()
-        .map(|display| {
-            let label = screen_capability_label(&display);
-            ScreenCapability {
-                id: screen_capability_id(&display),
-                legacy_id: screen_legacy_id(&display),
-                label,
-                width: display.width,
-                height: display.height,
-                refresh_hz: (display.frequency > 0.0).then_some(f64::from(display.frequency)),
-                backend: detect_backend(input_types).0,
-            }
-        })
-        .collect::<Vec<_>>();
     let (backend, mut diagnostics) = detect_backend(input_types);
+    let screens = match enumerate_screen_capabilities(input_types) {
+        Ok(screens) => screens,
+        Err(error) => {
+            diagnostics.push(format!("Display enumeration failed: {error:#}"));
+            Vec::new()
+        }
+    };
 
     let mut video_encoders = Vec::new();
     for encoder in context.available_video_encoders()? {
@@ -2112,6 +2303,24 @@ fn discover_capabilities(
         audio_isolation_available: cfg!(target_os = "linux") && has_pipewire_application,
         diagnostics,
     })
+}
+
+fn enumerate_screen_capabilities(input_types: &[String]) -> Result<Vec<ScreenCapability>> {
+    let backend = detect_backend(input_types).0;
+    let mut displays = DisplayInfo::all().map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    displays.sort_by_key(|display| !display.is_primary);
+    Ok(displays
+        .into_iter()
+        .map(|display| ScreenCapability {
+            id: screen_capability_id(&display),
+            legacy_id: screen_legacy_id(&display),
+            label: screen_capability_label(&display),
+            width: display.width,
+            height: display.height,
+            refresh_hz: screen_refresh_hz(&display),
+            backend,
+        })
+        .collect())
 }
 
 fn system_audio_exclusion_selectors(config: &RecorderConfig) -> Vec<String> {
