@@ -25,11 +25,7 @@ if (!url || !/^[a-f0-9]{64}$/.test(sha256)) {
 
 await mkdir(dirname(archive), { recursive: true });
 console.log(`Downloading pinned OBS runtime to ${archive}`);
-const response = await fetch(url);
-if (!response.ok || !response.body) {
-  throw new Error(`OBS runtime download failed: HTTP ${response.status}`);
-}
-await pipeline(response.body, createWriteStream(archive));
+await downloadArchive(url, archive);
 
 const digest = await sha256File(archive);
 if (digest !== sha256) {
@@ -73,6 +69,67 @@ function parseArgs(values) {
     parsed[key] = values[++index];
   }
   return parsed;
+}
+
+async function downloadArchive(url, destination) {
+  const temporary = `${destination}.part`;
+  const attempts = 4;
+  const timeoutMs = 120_000;
+  await rm(temporary, { force: true });
+
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        const response = await fetch(url, { signal: controller.signal });
+        if (!response.ok || !response.body) {
+          const error = new Error(`OBS runtime download failed: HTTP ${response.status}`);
+          error.retryable =
+            !response.body ||
+            response.status === 408 ||
+            response.status === 425 ||
+            response.status === 429 ||
+            response.status >= 500;
+          throw error;
+        }
+        await pipeline(response.body, createWriteStream(temporary));
+      } finally {
+        clearTimeout(timeout);
+      }
+
+      await rm(destination, { force: true });
+      await rename(temporary, destination);
+      return;
+    } catch (error) {
+      await rm(temporary, { force: true });
+      if (attempt === attempts || !isRetryableDownloadError(error)) throw error;
+
+      const delayMs = 1_000 * 2 ** (attempt - 1);
+      console.warn(
+        `OBS runtime download attempt ${attempt}/${attempts} failed; ` +
+          `retrying in ${delayMs}ms: ${errorMessage(error)}`,
+      );
+      await sleep(delayMs);
+    }
+  }
+}
+
+function isRetryableDownloadError(error) {
+  if (error?.retryable === true || error?.name === "AbortError") return true;
+  const code = error?.cause?.code ?? error?.code;
+  return (
+    error?.message === "fetch failed" ||
+    ["ECONNRESET", "ECONNREFUSED", "ETIMEDOUT", "EAI_AGAIN", "ENETUNREACH"].includes(code)
+  );
+}
+
+function errorMessage(error) {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function sleep(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
 async function sha256File(path) {
