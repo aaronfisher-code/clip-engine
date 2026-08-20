@@ -559,7 +559,9 @@ impl ObsBackend {
                     .context("create Windows capture settings")?;
                 let monitor = screen_id.parse::<i64>().unwrap_or(0);
                 settings.set_int("monitor", monitor)?;
-                settings.set_string("monitor_id", screen_id)?;
+                let monitor_id =
+                    windows_monitor_device_id(screen_id).unwrap_or_else(|| screen_id.to_owned());
+                settings.set_string("monitor_id", &monitor_id)?;
                 settings.set_bool("capture_cursor", true)?;
                 ("monitor_capture", settings)
             }
@@ -803,6 +805,63 @@ impl ObsBackend {
             })
             .ok_or_else(|| anyhow::anyhow!("audio encoder {requested} is not available"))
     }
+}
+
+#[cfg(windows)]
+fn windows_monitor_device_id(screen_id: &str) -> Option<String> {
+    use std::{ffi::c_void, mem::size_of};
+    use windows_sys::Win32::{
+        Graphics::Gdi::{
+            EnumDisplayDevicesW, GetMonitorInfoW, DISPLAY_DEVICEW, HMONITOR, MONITORINFO,
+            MONITORINFOEXW,
+        },
+        UI::WindowsAndMessaging::EDD_GET_DEVICE_INTERFACE_NAME,
+    };
+
+    let handle = screen_id.parse::<usize>().ok()? as *mut c_void as HMONITOR;
+    let mut monitor_info: MONITORINFOEXW = unsafe { std::mem::zeroed() };
+    monitor_info.monitorInfo.cbSize = size_of::<MONITORINFOEXW>() as u32;
+    let monitor_info_ptr = (&mut monitor_info as *mut MONITORINFOEXW).cast::<MONITORINFO>();
+    if unsafe { GetMonitorInfoW(handle, monitor_info_ptr) } == 0 {
+        return None;
+    }
+    let device_name_end = monitor_info
+        .szDevice
+        .iter()
+        .position(|character| *character == 0)
+        .unwrap_or(monitor_info.szDevice.len());
+    let device_name = String::from_utf16_lossy(&monitor_info.szDevice[..device_name_end]);
+
+    let mut display_device: DISPLAY_DEVICEW = unsafe { std::mem::zeroed() };
+    display_device.cb = size_of::<DISPLAY_DEVICEW>() as u32;
+    if unsafe {
+        EnumDisplayDevicesW(
+            monitor_info.szDevice.as_ptr(),
+            0,
+            &mut display_device,
+            EDD_GET_DEVICE_INTERFACE_NAME,
+        )
+    } == 0
+    {
+        return (!device_name.is_empty()).then_some(device_name);
+    }
+
+    let end = display_device
+        .DeviceID
+        .iter()
+        .position(|character| *character == 0)
+        .unwrap_or(display_device.DeviceID.len());
+    let device_id = String::from_utf16_lossy(&display_device.DeviceID[..end]);
+    Some(if device_id.is_empty() {
+        device_name
+    } else {
+        device_id
+    })
+}
+
+#[cfg(not(windows))]
+fn windows_monitor_device_id(_screen_id: &str) -> Option<String> {
+    None
 }
 
 struct ResolvedCaptureSettings {
