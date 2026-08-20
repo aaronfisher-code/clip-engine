@@ -1,8 +1,10 @@
 use anyhow::{Context, Result};
+#[cfg(not(windows))]
+use clip_engine_recorder_protocol::IPC_TIMEOUT;
 use clip_engine_recorder_protocol::{
     read_frame, write_frame, CaptureBackend, ClientMessage, RecorderCapabilities, RecorderConfig,
     RecorderEvent, RecorderMode, RecorderRequest, RecorderResponse, RecorderState, RecorderStatus,
-    ServiceMessage, DEFAULT_SOCKET_NAME, IPC_TIMEOUT, PROTOCOL_VERSION,
+    ServiceMessage, DEFAULT_SOCKET_NAME, PROTOCOL_VERSION,
 };
 use interprocess::{
     local_socket::{prelude::*, ConnectOptions, GenericNamespaced, Stream as LocalSocketStream},
@@ -18,6 +20,13 @@ use std::{
 };
 
 use crate::paths::AppPaths;
+
+/// Windows named-pipe helpers must run without opening a console window.
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 
 #[derive(Clone)]
 pub struct RecorderSupervisor {
@@ -196,6 +205,8 @@ fn ensure_connected_locked(paths: &AppPaths, inner: &mut RecorderInner) -> Resul
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped());
+        #[cfg(windows)]
+        command.creation_flags(CREATE_NO_WINDOW);
         if let Some(root) = paths.recorder_obs_root() {
             command.env("CLIP_ENGINE_OBS_ROOT", &root);
             configure_obs_library_path(&mut command, &root);
@@ -235,8 +246,11 @@ fn ensure_connected_locked(paths: &AppPaths, inner: &mut RecorderInner) -> Resul
         }
     };
     stream.set_nonblocking(false)?;
-    stream.set_recv_timeout(Some(IPC_TIMEOUT))?;
-    stream.set_send_timeout(Some(IPC_TIMEOUT))?;
+    #[cfg(not(windows))]
+    {
+        stream.set_recv_timeout(Some(IPC_TIMEOUT))?;
+        stream.set_send_timeout(Some(IPC_TIMEOUT))?;
+    }
     inner.stream = Some(stream);
     let auth_token = inner.auth_token.clone();
     let response = send_request_locked(

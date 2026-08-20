@@ -4,10 +4,12 @@ mod notify;
 
 use anyhow::Context;
 use backend::{create_backend, RecorderBackend};
+#[cfg(not(windows))]
+use clip_engine_recorder_protocol::IPC_TIMEOUT;
 use clip_engine_recorder_protocol::{
     is_ipc_timeout, read_frame, write_frame, AudioRoute, ClientMessage, RecorderConfig,
     RecorderError, RecorderEvent, RecorderRequest, RecorderResponse, RecorderState, ServiceMessage,
-    DEFAULT_SOCKET_NAME, IPC_TIMEOUT, PROTOCOL_VERSION,
+    DEFAULT_SOCKET_NAME, PROTOCOL_VERSION,
 };
 use hotkey::HotkeyController;
 use interprocess::local_socket::{
@@ -250,12 +252,15 @@ impl RecorderService {
         stream
             .set_nonblocking(false)
             .context("set recorder IPC blocking mode")?;
-        stream
-            .set_recv_timeout(Some(IPC_TIMEOUT))
-            .context("set recorder IPC receive timeout")?;
-        stream
-            .set_send_timeout(Some(IPC_TIMEOUT))
-            .context("set recorder IPC send timeout")?;
+        #[cfg(not(windows))]
+        {
+            stream
+                .set_recv_timeout(Some(IPC_TIMEOUT))
+                .context("set recorder IPC receive timeout")?;
+            stream
+                .set_send_timeout(Some(IPC_TIMEOUT))
+                .context("set recorder IPC send timeout")?;
+        }
 
         loop {
             let message = match read_frame::<_, ClientMessage>(&mut stream) {
