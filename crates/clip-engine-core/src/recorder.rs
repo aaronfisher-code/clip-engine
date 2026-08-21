@@ -319,7 +319,42 @@ fn configure_obs_library_path(command: &mut Command, root: &std::path::Path) {
         if let Ok(joined) = std::env::join_paths(path_directories) {
             command.env("PATH", joined);
         }
+
+        #[cfg(target_os = "linux")]
+        configure_spa_plugin_path(command);
     }
+}
+
+#[cfg(target_os = "linux")]
+fn configure_spa_plugin_path(command: &mut Command) {
+    let mut candidates = Vec::new();
+    if let Some(existing) = std::env::var_os("SPA_PLUGIN_DIR") {
+        candidates.push(PathBuf::from(existing));
+    }
+    candidates.extend([
+        PathBuf::from("/usr/lib/spa-0.2"),
+        PathBuf::from("/usr/lib64/spa-0.2"),
+        PathBuf::from(format!(
+            "/usr/lib/{}-linux-gnu/spa-0.2",
+            std::env::consts::ARCH
+        )),
+    ]);
+
+    if let Some(directory) = find_spa_plugin_directory(candidates) {
+        // The OBS runtime is built on Ubuntu, where libpipewire's compiled-in
+        // SPA path uses a Debian multiarch directory. AppImages run on hosts
+        // such as Arch that install the support factories in /usr/lib/spa-0.2.
+        // Point PipeWire at the host factories so pw_loop_new can instantiate
+        // support.system regardless of the build host's directory layout.
+        command.env("SPA_PLUGIN_DIR", directory);
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn find_spa_plugin_directory(candidates: impl IntoIterator<Item = PathBuf>) -> Option<PathBuf> {
+    candidates
+        .into_iter()
+        .find(|directory| directory.join("support/libspa-support.so").is_file())
 }
 
 fn send_request_locked(
@@ -562,6 +597,26 @@ fn exited_child_error(inner: &mut RecorderInner) -> Result<Option<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn spa_plugin_directory_requires_the_pipewire_support_factory() {
+        let root = std::env::temp_dir().join(format!(
+            "clip-engine-spa-plugin-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let invalid = root.join("invalid");
+        let valid = root.join("valid");
+        std::fs::create_dir_all(valid.join("support")).unwrap();
+        std::fs::write(valid.join("support/libspa-support.so"), []).unwrap();
+
+        assert_eq!(
+            find_spa_plugin_directory([invalid, valid.clone()]),
+            Some(valid)
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn helper_failure_resets_state_for_reconnect() {

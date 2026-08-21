@@ -85,6 +85,8 @@ libs = ["libmpv.so.2"]
 # serde camelCase: excluded_libs is ignored. Use excluded-libraries / excludedLibs.
 # Do not bundle Ubuntu XKB/AT-SPI; they SIGSEGV against Arch/CachyOS host copies.
 # Do not bundle libva: host FFmpeg 7+ needs vaMapBuffer2 from a newer libva.so.2.
+# Do not bundle libpipewire: its compiled-in SPA plugin directory is distro-specific,
+# and an Ubuntu build cannot find support.system on Arch-style /usr/lib layouts.
 excluded-libraries = [
     "libxkbcommon.so.0",
     "libxkbcommon-x11.so.0",
@@ -96,6 +98,7 @@ excluded-libraries = [
     "libva-x11.so.2",
     "libva-wayland.so.2",
     "libva-glx.so.2",
+    "libpipewire-0.3.so.0",
 ]
 
 [package.metadata.packager.deb]

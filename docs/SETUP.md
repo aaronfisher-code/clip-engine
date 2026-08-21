@@ -152,6 +152,11 @@ requires the corresponding vendor driver and hardware support.
   can leave a saved route unavailable until it is refreshed and added again.
 - X11 uses OBS `xshm_input` and PulseAudio-compatible sources.
 - Wayland uses OBS PipeWire plus xdg-desktop-portal for screen selection.
+  AppImage launches resolve the host's SPA plugin directory and use the host
+  `libpipewire-0.3`; bundling the Ubuntu copy would make PipeWire look for
+  `support.system` in a Debian-specific path that does not exist on Arch-based
+  distributions. A local launch can override discovery with `SPA_PLUGIN_DIR`
+  when PipeWire is installed in a non-standard prefix.
   The optional `linux-pipewire-audio` OBS plugin provides application capture
   on both Linux display backends: the helper discovers active
   PipeWire/PipeWire-Pulse streams and routes each selected executable or
