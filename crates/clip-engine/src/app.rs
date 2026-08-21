@@ -2044,90 +2044,6 @@ impl ClipApp {
                             self.recorder_playback_selection = None;
                         }
                         let mut playback_selection = self.recorder_playback_selection.clone();
-                        if available_playback_sources.is_empty() {
-                            ui.label(
-                                RichText::new(
-                                    "No active Windows playback devices were reported. Connect or enable the endpoint, then refresh the recorder.",
-                                )
-                                .color(theme::MUTED)
-                                .size(11.0),
-                            );
-                        } else {
-                            egui::Grid::new("recorder-add-playback-device")
-                                .num_columns(2)
-                                .spacing([12.0, 8.0])
-                                .show(ui, |ui| {
-                                    encoder_settings_label(
-                                        ui,
-                                        "Add playback device",
-                                        audio_label_width,
-                                    );
-                                    encoder_settings_control_area(ui, |ui| {
-                                        let add_button_width = 58.0;
-                                        let selected_text = playback_selection
-                                            .as_ref()
-                                            .and_then(|selection| {
-                                                available_playback_sources
-                                                    .iter()
-                                                    .find(|source| &source.id == selection)
-                                            })
-                                            .map(|source| source.label.clone())
-                                            .unwrap_or_else(|| "Choose a device…".into());
-                                        egui::ComboBox::from_id_salt("recorder-playback-device")
-                                            .width(
-                                                (audio_control_width - add_button_width - 12.0)
-                                                    .max(120.0),
-                                            )
-                                            .selected_text(selected_text)
-                                            .show_ui(ui, |ui| {
-                                                for source in &available_playback_sources {
-                                                    ui.selectable_value(
-                                                        &mut playback_selection,
-                                                        Some(source.id.clone()),
-                                                        source.label.clone(),
-                                                    );
-                                                }
-                                            });
-                                        if ui
-                                            .add_enabled(
-                                                playback_selection.is_some(),
-                                                egui::Button::new("Add"),
-                                            )
-                                            .clicked()
-                                        {
-                                            if let Some(source_id) = playback_selection.clone() {
-                                                if let Some(route) = self
-                                                    .recorder_config
-                                                    .audio_routes
-                                                    .iter_mut()
-                                                    .find(|route| route.source_id == source_id)
-                                                {
-                                                    route.enabled = true;
-                                                } else {
-                                                    let track =
-                                                        next_audio_track(&self.recorder_config);
-                                                    let track_name = available_playback_sources
-                                                        .iter()
-                                                        .find(|source| source.id == source_id)
-                                                        .map(|source| source.label.clone())
-                                                        .unwrap_or_default();
-                                                    self.recorder_config.audio_routes.push(
-                                                        AudioRoute {
-                                                            source_id,
-                                                            track,
-                                                            track_name,
-                                                            enabled: true,
-                                                        },
-                                                    );
-                                                }
-                                                playback_selection = None;
-                                            }
-                                        }
-                                    });
-                                    ui.end_row();
-                                });
-                        }
-                        self.recorder_playback_selection = playback_selection;
 
                         let playback_routes = self
                             .recorder_config
@@ -2215,6 +2131,91 @@ impl ClipApp {
                         for index in remove_playback_routes {
                             self.recorder_config.audio_routes.remove(index);
                         }
+
+                        if available_playback_sources.is_empty() {
+                            ui.label(
+                                RichText::new(
+                                    "No active Windows playback devices were reported. Connect or enable the endpoint, then refresh the recorder.",
+                                )
+                                .color(theme::MUTED)
+                                .size(11.0),
+                            );
+                        } else {
+                            egui::Grid::new("recorder-add-playback-device")
+                                .num_columns(2)
+                                .spacing([12.0, 8.0])
+                                .show(ui, |ui| {
+                                    encoder_settings_label(
+                                        ui,
+                                        "Append playback device",
+                                        audio_label_width,
+                                    );
+                                    encoder_settings_control_area(ui, |ui| {
+                                        let add_button_width = 58.0;
+                                        let selected_text = playback_selection
+                                            .as_ref()
+                                            .and_then(|selection| {
+                                                available_playback_sources
+                                                    .iter()
+                                                    .find(|source| &source.id == selection)
+                                            })
+                                            .map(|source| source.label.clone())
+                                            .unwrap_or_else(|| "Choose a device…".into());
+                                        egui::ComboBox::from_id_salt("recorder-playback-device")
+                                            .width(
+                                                (audio_control_width - add_button_width - 12.0)
+                                                    .max(120.0),
+                                            )
+                                            .selected_text(selected_text)
+                                            .show_ui(ui, |ui| {
+                                                for source in &available_playback_sources {
+                                                    ui.selectable_value(
+                                                        &mut playback_selection,
+                                                        Some(source.id.clone()),
+                                                        source.label.clone(),
+                                                    );
+                                                }
+                                            });
+                                        if ui
+                                            .add_enabled(
+                                                playback_selection.is_some(),
+                                                egui::Button::new("Add"),
+                                            )
+                                            .clicked()
+                                        {
+                                            if let Some(source_id) = playback_selection.clone() {
+                                                if let Some(route) = self
+                                                    .recorder_config
+                                                    .audio_routes
+                                                    .iter_mut()
+                                                    .find(|route| route.source_id == source_id)
+                                                {
+                                                    route.enabled = true;
+                                                } else {
+                                                    let track =
+                                                        next_audio_track(&self.recorder_config);
+                                                    let track_name = available_playback_sources
+                                                        .iter()
+                                                        .find(|source| source.id == source_id)
+                                                        .map(|source| source.label.clone())
+                                                        .unwrap_or_default();
+                                                    self.recorder_config.audio_routes.push(
+                                                        AudioRoute {
+                                                            source_id,
+                                                            track,
+                                                            track_name,
+                                                            enabled: true,
+                                                        },
+                                                    );
+                                                }
+                                                playback_selection = None;
+                                            }
+                                        }
+                                    });
+                                    ui.end_row();
+                                });
+                        }
+                        self.recorder_playback_selection = playback_selection;
                     }
 
                     let selection_is_available = self
