@@ -1035,7 +1035,7 @@ dependencies = [
 
 [[package]]
 name = "clip-engine"
-version = "1.1.17"
+version = "1.1.18"
 dependencies = [
  "anyhow",
  "auto-launcher",
@@ -1064,7 +1064,7 @@ dependencies = [
 
 [[package]]
 name = "clip-engine-core"
-version = "1.1.17"
+version = "1.1.18"
 dependencies = [
  "anyhow",
  "aws-credential-types",
@@ -1087,7 +1087,7 @@ dependencies = [
 
 [[package]]
 name = "clip-engine-recorder"
-version = "1.1.17"
+version = "1.1.18"
 dependencies = [
  "anyhow",
  "clip-engine-recorder-protocol",
@@ -1104,7 +1104,7 @@ dependencies = [
 
 [[package]]
 name = "clip-engine-recorder-protocol"
-version = "1.1.17"
+version = "1.1.18"
 dependencies = [
  "serde",
  "serde_json",
