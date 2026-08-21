@@ -295,8 +295,16 @@ jobs:
       - name: Bundle libmpv on Windows
         if: runner.os == 'Windows'
         shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
-          $rel = Invoke-RestMethod -Headers @{ 'User-Agent' = 'clip-engine-ci' } https://api.github.com/repos/zhongfly/mpv-winbuild/releases/latest
+          $headers = @{
+            'Accept' = 'application/vnd.github+json'
+            'Authorization' = "Bearer $env:GITHUB_TOKEN"
+            'User-Agent' = 'clip-engine-ci'
+            'X-GitHub-Api-Version' = '2022-11-28'
+          }
+          $rel = Invoke-RestMethod -Headers $headers https://api.github.com/repos/zhongfly/mpv-winbuild/releases/latest
           $asset = $rel.assets | Where-Object { $_.name -like 'mpv-dev-x86_64-*' -and $_.name -like '*.7z' } | Select-Object -First 1
           if (-not $asset) { throw 'mpv-dev asset missing' }
           Invoke-WebRequest $asset.browser_download_url -OutFile "$env:RUNNER_TEMP/mpv-dev.7z"
