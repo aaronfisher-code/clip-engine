@@ -43,9 +43,8 @@ use windows::{
         Devices::FunctionDiscovery::PKEY_Device_FriendlyName,
         Media::Audio::{eRender, IMMDeviceEnumerator, MMDeviceEnumerator, DEVICE_STATE_ACTIVE},
         System::Com::{
-            CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize,
-            StructuredStorage::{PropVariantClear, PropVariantToString},
-            CLSCTX_ALL, COINIT_MULTITHREADED, STGM_READ,
+            CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, CLSCTX_ALL,
+            COINIT_MULTITHREADED, STGM_READ,
         },
     },
 };
@@ -2839,19 +2838,12 @@ fn windows_playback_device_friendly_name(
     device: &windows::Win32::Media::Audio::IMMDevice,
 ) -> Result<String> {
     let property_store = unsafe { device.OpenPropertyStore(STGM_READ) }?;
-    let mut value = unsafe { property_store.GetValue(&PKEY_Device_FriendlyName) }?;
-    let result = (|| {
-        let mut buffer = [0u16; 512];
-        unsafe { PropVariantToString(&value, &mut buffer) }?;
-        Ok(String::from_utf16_lossy(&buffer)
-            .trim_end_matches('\0')
-            .trim()
-            .to_string())
-    })();
-    unsafe {
-        let _ = PropVariantClear(&mut value);
+    let value = unsafe { property_store.GetValue(&PKEY_Device_FriendlyName) }?;
+    let label = value.to_string().trim().to_string();
+    if label.is_empty() {
+        anyhow::bail!("Windows playback device has no friendly name");
     }
-    result
+    Ok(label)
 }
 
 #[cfg(any(windows, test))]

@@ -579,7 +579,9 @@ impl ClipApp {
                     self.recorder_loading = false;
                     self.update_checking = false;
                     if self.show_recorder {
-                        self.recorder_capabilities = self.engine.recorder_capabilities();
+                        let mut capabilities = self.engine.recorder_capabilities();
+                        ensure_playback_device_labels(&mut capabilities);
+                        self.recorder_capabilities = capabilities;
                         self.recorder_status = self.engine.recorder_status();
                     }
                     if matches!(self.export_modal, Some(ExportModal::Working { .. })) {
@@ -705,9 +707,10 @@ impl ClipApp {
                     }
                 }
                 Message::RecorderRefreshed {
-                    capabilities,
+                    mut capabilities,
                     status,
                 } => {
+                    ensure_playback_device_labels(&mut capabilities);
                     self.recorder_config = capabilities.normalize_config(&self.recorder_config);
                     self.recorder_capabilities = capabilities;
                     ensure_default_audio_routes(
@@ -5881,6 +5884,26 @@ fn ensure_audio_route_names(config: &mut RecorderConfig, sources: &[AudioSourceC
             .find(|source| source.id == route.source_id)
             .map(|source| source.label.clone())
             .unwrap_or_else(|| fallback_audio_route_name(&route.source_id, route.track));
+    }
+}
+
+fn ensure_playback_device_labels(capabilities: &mut RecorderCapabilities) {
+    for source in capabilities
+        .audio_sources
+        .iter_mut()
+        .filter(|source| source.kind == AudioSourceKind::PlaybackDevice)
+    {
+        if !source.label.trim().is_empty() {
+            continue;
+        }
+        let endpoint_id = source
+            .id
+            .strip_prefix("playback:")
+            .map(str::trim)
+            .filter(|endpoint_id| !endpoint_id.is_empty());
+        source.label = endpoint_id
+            .map(|endpoint_id| format!("Playback endpoint ({endpoint_id})"))
+            .unwrap_or_else(|| "Playback device".into());
     }
 }
 
