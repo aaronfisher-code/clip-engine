@@ -44,7 +44,7 @@ use windows::{
         Media::Audio::{eRender, IMMDeviceEnumerator, MMDeviceEnumerator, DEVICE_STATE_ACTIVE},
         System::Com::{
             CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize,
-            StructuredStorage::{PropVariantClear, PropVariantToString, PROPVARIANT},
+            StructuredStorage::{PropVariantClear, PropVariantToString},
             CLSCTX_ALL, COINIT_MULTITHREADED, STGM_READ,
         },
     },
@@ -2801,7 +2801,9 @@ fn enumerate_windows_playback_devices() -> Result<Vec<(String, String)>> {
             }
 
             let label = windows_playback_device_friendly_name(&device)
-                .unwrap_or_else(|_| device_id.clone());
+                .ok()
+                .filter(|label| !label.trim().is_empty())
+                .unwrap_or_else(|| device_id.clone());
             devices.push((device_id, label));
         }
 
@@ -2837,9 +2839,8 @@ fn windows_playback_device_friendly_name(
     device: &windows::Win32::Media::Audio::IMMDevice,
 ) -> Result<String> {
     let property_store = unsafe { device.OpenPropertyStore(STGM_READ) }?;
-    let mut value = PROPVARIANT::default();
+    let mut value = unsafe { property_store.GetValue(&PKEY_Device_FriendlyName) }?;
     let result = (|| {
-        unsafe { property_store.GetValue(&PKEY_Device_FriendlyName) }?;
         let mut buffer = [0u16; 512];
         unsafe { PropVariantToString(&value, &mut buffer) }?;
         Ok(String::from_utf16_lossy(&buffer)
