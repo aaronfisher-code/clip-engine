@@ -255,9 +255,12 @@ impl ClipApp {
             Ok(tray) => (Some(tray), None),
             Err(error) => (None, Some(format!("System tray unavailable: {error:#}"))),
         };
-        if background && tray_error.is_some() {
+        if background {
+            // eframe reveals the root window after its first frame, even when
+            // NativeOptions requested an initially hidden viewport. Re-assert
+            // the intended startup visibility after that frame is processed.
             cc.egui_ctx
-                .send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                .send_viewport_cmd(egui::ViewportCommand::Visible(tray_error.is_some()));
         }
         let player = match Player::new(&cc.egui_ctx, cc.gl.is_some(), cc.display_handle().ok()) {
             Ok(player) => Some(player),
