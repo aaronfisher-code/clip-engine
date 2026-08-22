@@ -185,8 +185,9 @@ the editor window hides it rather than stopping the helper; use the tray menu's
 Quit action to shut down the application. The Recorder panel has a
 **Launch Clip Engine at login** setting, enabled by default. The generated
 startup entry passes `--background`, which starts the app hidden and starts the
-saved replay configuration. A red dot on the tray icon indicates that the replay
-buffer is currently running.
+saved replay configuration. Login startup retries for up to 30 seconds while
+the desktop's display and audio services become ready. A red dot on the tray
+icon indicates that the replay buffer is currently running.
 
 Windows uses the current user's Run registry entry. Linux uses an XDG Autostart
 desktop entry under `~/.config/autostart` (or `$XDG_CONFIG_HOME/autostart`).

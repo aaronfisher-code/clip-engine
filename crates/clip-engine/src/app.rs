@@ -24,6 +24,14 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
 
+const RECORDER_LOGIN_START_ATTEMPTS: usize = 5;
+const RECORDER_LOGIN_RETRY_DELAYS: [Duration; RECORDER_LOGIN_START_ATTEMPTS - 1] = [
+    Duration::from_secs(2),
+    Duration::from_secs(4),
+    Duration::from_secs(8),
+    Duration::from_secs(16),
+];
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum AuthMode {
     Request,
@@ -338,7 +346,7 @@ impl ClipApp {
                 }
                 app.sync_tray_recording();
                 if background {
-                    app.start_recorder();
+                    app.start_recorder_at_login();
                 }
                 app.schedule_update_check(false);
                 app.import_startup_files();
@@ -422,7 +430,7 @@ impl ClipApp {
         app.schedule_update_check(false);
         app.import_startup_files();
         if background {
-            app.start_recorder();
+            app.start_recorder_at_login();
         }
         app
     }
@@ -1176,19 +1184,54 @@ impl ClipApp {
     }
 
     fn start_recorder(&mut self) {
+        self.start_recorder_with_attempts(1);
+    }
+
+    fn start_recorder_at_login(&mut self) {
+        self.start_recorder_with_attempts(RECORDER_LOGIN_START_ATTEMPTS);
+    }
+
+    fn start_recorder_with_attempts(&mut self, attempts: usize) {
         self.recorder_config = self
             .recorder_capabilities
             .normalize_config(&self.recorder_config);
         let engine = self.engine.clone();
         let config = self.recorder_config.clone();
         self.run_async(async move {
-            engine.apply_recorder_config(config)?;
-            engine.start_recorder()?;
-            let (capabilities, status) = engine.refresh_recorder()?;
-            Ok(Message::RecorderRefreshed {
-                capabilities,
-                status: Box::new(status),
-            })
+            let attempts = attempts.max(1);
+            let mut last_error = None;
+            for attempt in 0..attempts {
+                match start_recorder_once(&engine, &config) {
+                    Ok((capabilities, status)) => {
+                        return Ok(Message::RecorderRefreshed {
+                            capabilities,
+                            status: Box::new(status),
+                        });
+                    }
+                    Err(error) => last_error = Some(error),
+                }
+
+                if attempt + 1 < attempts {
+                    let delay = RECORDER_LOGIN_RETRY_DELAYS
+                        .get(attempt)
+                        .copied()
+                        .unwrap_or_else(|| {
+                            *RECORDER_LOGIN_RETRY_DELAYS
+                                .last()
+                                .expect("recorder retry delays must not be empty")
+                        });
+                    tokio::time::sleep(delay).await;
+                }
+            }
+
+            let error = last_error.unwrap_or_else(|| anyhow::anyhow!("recorder did not start"));
+            if attempts > 1 {
+                Err(error.context(format!(
+                    "Could not start the recorder at login after {attempts} attempts"
+                )))
+            } else {
+                Err(error)
+            }
         });
     }
 
@@ -5035,6 +5078,17 @@ fn update_restart_note() -> String {
     )
 }
 
+fn start_recorder_once(
+    engine: &Engine,
+    config: &RecorderConfig,
+) -> anyhow::Result<(RecorderCapabilities, RecorderStatus)> {
+    if !engine.recorder_status().replay_active {
+        engine.apply_recorder_config(config.clone())?;
+        engine.start_recorder()?;
+    }
+    engine.refresh_recorder()
+}
+
 fn condensed_release_notes(notes: &str) -> String {
     let trimmed = notes.trim();
     if trimmed.is_empty() {
@@ -6020,7 +6074,10 @@ fn track_name(track: &clip_engine_core::AudioTrack) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_cli_flag, media_paths_from_args, recorder_hotkey_from_event};
+    use super::{
+        is_cli_flag, media_paths_from_args, recorder_hotkey_from_event,
+        RECORDER_LOGIN_RETRY_DELAYS, RECORDER_LOGIN_START_ATTEMPTS,
+    };
     use eframe::egui::{Key, Modifiers};
     use std::ffi::OsStr;
     use std::path::PathBuf;
@@ -6032,6 +6089,22 @@ mod tests {
         assert!(is_cli_flag(OsStr::new("/UPDATE")));
         assert!(!is_cli_flag(OsStr::new(r"C:\clips\round.mkv")));
         assert!(!is_cli_flag(OsStr::new("round.mp4")));
+    }
+
+    #[test]
+    fn recorder_login_retries_cover_slow_session_startup() {
+        assert_eq!(RECORDER_LOGIN_START_ATTEMPTS, 5);
+        assert_eq!(
+            RECORDER_LOGIN_RETRY_DELAYS.len() + 1,
+            RECORDER_LOGIN_START_ATTEMPTS
+        );
+        assert_eq!(
+            RECORDER_LOGIN_RETRY_DELAYS
+                .iter()
+                .copied()
+                .sum::<std::time::Duration>(),
+            std::time::Duration::from_secs(30)
+        );
     }
 
     #[test]
