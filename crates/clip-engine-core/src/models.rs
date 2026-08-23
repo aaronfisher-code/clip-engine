@@ -88,7 +88,6 @@ pub struct ExportConfig {
 pub struct AppConfig {
     pub source_directory: String,
     pub authenticated: bool,
-    pub pending_access_request: bool,
     pub r2_configured: bool,
     pub public_base_url: Option<String>,
     pub api_base_url: String,

@@ -4,7 +4,6 @@ export type ClipStatus = "uploading" | "published" | "expired" | "deleted" | "fa
 
 export type CloudUser = {
   id: string;
-  username: string;
   displayName: string;
   role: UserRole;
   status: UserStatus;
@@ -58,29 +57,25 @@ export type CreatedUpload = {
 
 export type CompleteUpload = { videoEtag?: string; thumbnailEtag?: string };
 
-export type Invite = {
+export type LicenceStatus = "active" | "revoked";
+
+export type Licence = {
   id: string;
-  username?: string;
-  role: UserRole;
-  purpose: "enroll" | "password_reset";
-  expiresAt: string;
-  redeemedAt?: string;
-};
-
-export type CreatedInvite = Invite & { token: string; url: string };
-
-export type AccessRequestStatus = "pending" | "approved" | "denied";
-
-export type AccessRequest = {
-  id: string;
-  username: string;
-  displayName: string;
-  status: AccessRequestStatus;
+  keyHint: string;
+  label: string;
+  status: LicenceStatus;
+  userId?: string;
+  displayName?: string;
+  deviceCount: number;
+  activeClipCount: number;
+  activeBytes: number;
+  uploadedBytes: number;
   createdAt: string;
-  reviewedAt?: string;
+  lastActivatedAt?: string;
+  revokedAt?: string;
 };
 
-export type CreatedAccessRequest = AccessRequest & { requestToken: string };
+export type CreatedLicence = Licence & { key: string };
 
 export type DeviceSession = {
   token: string;

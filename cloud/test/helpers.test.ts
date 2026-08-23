@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { cleanCredential, cleanUsername, validateUploadIntent } from "../src";
+import { cleanLicenceKey, validateUploadIntent } from "../src";
 import { cors } from "../src/http";
 import { escapeHtml, sharePage } from "../src/share";
 import { createR2TemporaryCredentials } from "../src/r2-credentials";
@@ -55,15 +55,10 @@ describe("cloud input boundaries", () => {
     expect(trusted.headers.get("x-content-type-options")).toBe("nosniff");
   });
 
-  it("normalizes usernames and rejects unsafe forms", () => {
-    expect(cleanUsername("  Aaron-Clips ")).toBe("aaron-clips");
-    expect(() => cleanUsername("no spaces")).toThrow(/Username/);
-    expect(() => cleanUsername("ab")).toThrow(/Username/);
-  });
-
-  it("accepts only a 256-bit URL-safe derived credential", () => {
-    expect(cleanCredential("A".repeat(43))).toHaveLength(43);
-    expect(() => cleanCredential("human password 12345")).toThrow(/credential/);
+  it("accepts only Clip Engine licence keys", () => {
+    const key = `CE-${"A".repeat(32)}`;
+    expect(cleanLicenceKey(`  ${key}  `)).toBe(key);
+    expect(() => cleanLicenceKey("human password 12345")).toThrow(/licence key/i);
   });
 
   it("locally signs path-scoped R2 temporary credentials", async () => {

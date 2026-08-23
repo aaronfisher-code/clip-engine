@@ -118,7 +118,7 @@ OBS and capture overhead. Hardware encoding and shorter buffers keep 1080p120
 and 1440p120 efficient; longer, higher-quality, or software-encoded buffers
 naturally use more memory.
 
-**A library that stays yours.** Clips live in a local library on your PC. Approved teammates also see a shared cloud library of what the group has published.
+**A library that stays yours.** Clips live in a local library on your PC. Licensed teammates also see a shared cloud library of what the group has published.
 
 **Links that expire.** Published clips get a public page with a preview image, then disappear after 30 days. You can extend a clip or revoke access when you need to.
 
@@ -135,16 +135,16 @@ Anyone with the link can watch. The page looks like a finished product — title
 
 ---
 
-## Accounts, without the usual hassle
+## Publishing licences, without accounts
 
-Publishing is for people the owner has approved. Watching a shared link does not require an account.
+Publishing is limited to people who have a licence from the owner. Watching a shared link does not require a licence.
 
-1. Install the app and choose **Create account**.
-2. Pick a username, a display name, and a password. No email is collected.
-3. Request access and wait — the owner reviews the queue under **Manage access**.
-4. Once approved, sign in. You stay signed in across restarts until you sign out or the owner revokes you.
+1. Install the app and edit clips normally—there is no registration or sign-in screen.
+2. When you first choose **Publish**, enter the licence key the owner sent you.
+3. Choose the display name that should appear beside your published clips.
+4. The app securely remembers that licence on this device until you remove it or the owner revokes it.
 
-Forgot a password? The owner can issue a one-day reset from **Manage access → Active**. You never have to send a human password over the internet: the app derives a credential on your device, and the server only ever sees that.
+Owners generate keys under **Manage access**, copy each key once, and send it privately. A revoked licence immediately loses API and publishing access; restoring it requires the recipient to enter the same key again. Clip Engine never asks members for an email address, username, or password.
 
 ---
 

@@ -1,15 +1,13 @@
 import type {
   CloudClip,
   CompleteUpload,
-  AccessRequest,
-  CreatedAccessRequest,
-  CreatedInvite,
+  CreatedLicence,
   CreatedUpload,
   DeviceSession,
+  Licence,
   UploadIntent,
-  UserRole,
 } from "@clip-engine/contracts";
-import { authenticate, bearerToken, randomToken, secureEqual, tokenHash } from "./security";
+import { authenticate, randomToken, secureEqual, tokenHash } from "./security";
 import { body, cors, errorResponse, HttpError, json } from "./http";
 import { gonePage, sharePage } from "./share";
 import { createR2TemporaryCredentials } from "./r2-credentials";
@@ -24,22 +22,6 @@ function cleanText(value: unknown, field: string, maximum: number) {
   const clean = value.trim().replace(/\s+/g, " ");
   if (!clean || clean.length > maximum) throw new HttpError(400, `${field} must be between 1 and ${maximum} characters.`);
   return clean;
-}
-
-export function cleanUsername(value: unknown) {
-  if (typeof value !== "string") throw new HttpError(400, "Username is required.");
-  const username = value.trim().toLowerCase();
-  if (!/^[a-z0-9][a-z0-9_-]{2,31}$/.test(username)) {
-    throw new HttpError(400, "Username must be 3–32 characters using letters, numbers, hyphens, or underscores.");
-  }
-  return username;
-}
-
-export function cleanCredential(value: unknown) {
-  if (typeof value !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(value)) {
-    throw new HttpError(400, "The password credential is invalid.");
-  }
-  return value;
 }
 
 function internalEmail(id: string) {
@@ -91,39 +73,27 @@ async function issueDevice(env: Env, userId: string, name: string) {
   return { token, deviceId };
 }
 
-type PasswordUser = {
+type SessionUser = {
   id: string;
-  username: string | null;
-  password_hash: string | null;
-  password_salt: string | null;
-  password_iterations: number | null;
-  password_scheme: "server-pbkdf2-v1" | "client-pbkdf2-v1";
   display_name: string;
-  role: UserRole;
+  role: "owner" | "member";
   status: string;
 };
 
-function sessionUser(user: PasswordUser) {
+function sessionUser(user: SessionUser) {
   return {
     id: user.id,
-    username: user.username || "",
     displayName: user.display_name,
     role: user.role,
     status: "active" as const,
   };
 }
 
-async function ensureUsernameAvailable(env: Env, username: string, exceptUserId?: string) {
-  const existing = await env.DB.prepare("SELECT id FROM users WHERE username = ?1 COLLATE NOCASE")
-    .bind(username).first<{ id: string }>();
-  if (existing && existing.id !== exceptUserId) throw new HttpError(409, "That username is already in use.");
-}
-
 async function rateBucket(env: Env, value: string) {
   return tokenHash(value, env.TOKEN_PEPPER);
 }
 
-async function enforceRateLimit(env: Env, buckets: string[], message = "Too many sign-in attempts. Try again in a few minutes.") {
+async function enforceRateLimit(env: Env, buckets: string[], message = "Too many activation attempts. Try again in a few minutes.") {
   const now = isoNow();
   for (const bucket of buckets) {
     const attempt = await env.DB.prepare("SELECT blocked_until FROM auth_attempts WHERE bucket = ?1")
@@ -149,53 +119,72 @@ async function recordAttempt(env: Env, bucket: string, maximum: number, windowMi
     .bind(bucket, failures, windowStarted, blockedUntil, now).run();
 }
 
-async function login(request: Request, env: Env) {
-  const input = await body<{ username: string; credentialSecret: string; ownerToken?: string; deviceName: string }>(request);
-  const username = cleanUsername(input.username);
-  const credentialSecret = cleanCredential(input.credentialSecret);
+export function cleanLicenceKey(value: unknown) {
+  if (typeof value !== "string") throw new HttpError(400, "Licence key is required.");
+  const key = value.trim();
+  if (!/^CE-[A-Za-z0-9_-]{32}$/.test(key)) throw new HttpError(400, "That licence key is not valid.");
+  return key;
+}
+
+async function activateLicence(request: Request, env: Env) {
+  const input = await body<{ licenceKey: string; displayName: string; deviceName: string }>(request);
+  const suppliedKey = typeof input.licenceKey === "string" ? input.licenceKey.trim() : "";
+  const displayName = cleanText(input.displayName, "Display name", 100);
+  const deviceName = cleanText(input.deviceName, "Device name", 100);
   const ip = request.headers.get("CF-Connecting-IP") || "unknown";
-  const usernameBucket = await rateBucket(env, `login:username:${username}`);
-  const ipBucket = await rateBucket(env, `login:ip:${ip}`);
-  await enforceRateLimit(env, [usernameBucket, ipBucket]);
-  let user = await env.DB.prepare(`SELECT id, username, password_hash, password_salt, password_iterations,
-    password_scheme, display_name, role, status FROM users WHERE username = ?1 COLLATE NOCASE`).bind(username).first<PasswordUser>();
-  const submittedHash = await tokenHash(credentialSecret, env.TOKEN_PEPPER);
-  let valid = user?.password_scheme === "client-pbkdf2-v1"
-    && secureEqual(submittedHash, user.password_hash || "0".repeat(64));
-  if (!valid && username === "admin" && typeof input.ownerToken === "string") {
-    const suppliedOwnerToken = await tokenHash(input.ownerToken, env.TOKEN_PEPPER);
-    const expectedOwnerToken = await tokenHash(env.BOOTSTRAP_TOKEN, env.TOKEN_PEPPER);
-    if (secureEqual(suppliedOwnerToken, expectedOwnerToken)) {
-      const existingOwner = await env.DB.prepare(`SELECT id, username, password_hash, password_salt, password_iterations,
-        password_scheme, display_name, role, status FROM users WHERE role = 'owner' ORDER BY created_at LIMIT 1`).first<PasswordUser>();
-      const now = isoNow();
-      if (existingOwner) {
-        if (existingOwner.status !== "active") throw new HttpError(403, "The owner account is not active.");
-        await ensureUsernameAvailable(env, "admin", existingOwner.id);
-        await env.DB.prepare(`UPDATE users SET username = 'admin', password_hash = ?1, password_salt = NULL,
-          password_iterations = 600000, password_scheme = 'client-pbkdf2-v1', display_name = 'Admin', updated_at = ?2
-          WHERE id = ?3`).bind(submittedHash, now, existingOwner.id).run();
-        user = { ...existingOwner, username: "admin", password_hash: submittedHash, password_salt: null,
-          password_iterations: 600_000, password_scheme: "client-pbkdf2-v1", display_name: "Admin" };
-      } else {
-        const userId = crypto.randomUUID();
-        await env.DB.prepare(`INSERT INTO users (id, email, username, password_hash, password_salt, password_iterations,
-          password_scheme, display_name, role, status, created_at, updated_at)
-          VALUES (?1, ?2, 'admin', ?3, NULL, 600000, 'client-pbkdf2-v1', 'Admin', 'owner', 'active', ?4, ?4)`)
-          .bind(userId, internalEmail(userId), submittedHash, now).run();
-        user = { id: userId, username: "admin", password_hash: submittedHash, password_salt: null,
-          password_iterations: 600_000, password_scheme: "client-pbkdf2-v1", display_name: "Admin", role: "owner", status: "active" };
-      }
-      valid = true;
+  const ipBucket = await rateBucket(env, `licence:ip:${ip}`);
+  await enforceRateLimit(env, [ipBucket], "Too many licence attempts. Try again in a few minutes.");
+  const suppliedHash = await tokenHash(suppliedKey, env.TOKEN_PEPPER);
+  const bootstrapHash = await tokenHash(env.BOOTSTRAP_TOKEN, env.TOKEN_PEPPER);
+  const now = isoNow();
+  let user: SessionUser;
+  let licenceId: string | undefined;
+  if (secureEqual(suppliedHash, bootstrapHash)) {
+    const existing = await env.DB.prepare(`SELECT id, display_name, role, status FROM users
+      WHERE role = 'owner' ORDER BY created_at LIMIT 1`).first<SessionUser>();
+    if (existing) {
+      await env.DB.prepare(`UPDATE users SET display_name = ?1, status = 'active', updated_at = ?2 WHERE id = ?3`)
+        .bind(displayName, now, existing.id).run();
+      user = { ...existing, display_name: displayName, status: "active" };
+    } else {
+      const userId = crypto.randomUUID();
+      await env.DB.prepare(`INSERT INTO users (id, email, username, display_name, role, status, created_at, updated_at)
+        VALUES (?1, ?2, 'admin', ?3, 'owner', 'active', ?4, ?4)`)
+        .bind(userId, internalEmail(userId), displayName, now).run();
+      user = { id: userId, display_name: displayName, role: "owner", status: "active" };
     }
+  } else {
+    const key = cleanLicenceKey(suppliedKey);
+    const licence = await env.DB.prepare(`SELECT id, user_id, status FROM licence_keys WHERE token_hash = ?1`)
+      .bind(await tokenHash(key, env.TOKEN_PEPPER)).first<{ id: string; user_id: string | null; status: string }>();
+    if (!licence || licence.status !== "active") {
+      await recordAttempt(env, ipBucket, 10);
+      throw new HttpError(403, "That licence key is invalid or has been revoked.", "invalid_licence");
+    }
+    licenceId = licence.id;
+    if (licence.user_id) {
+      const existing = await env.DB.prepare("SELECT id, display_name, role, status FROM users WHERE id = ?1")
+        .bind(licence.user_id).first<SessionUser>();
+      if (!existing) throw new HttpError(409, "This licence is not linked to a valid user.");
+      user = existing;
+    } else {
+      const userId = crypto.randomUUID();
+      const results = await env.DB.batch([
+        env.DB.prepare(`INSERT INTO users (id, email, username, display_name, role, status, created_at, updated_at)
+          VALUES (?1, ?2, NULL, ?3, 'member', 'active', ?4, ?4)`)
+          .bind(userId, internalEmail(userId), displayName, now),
+        env.DB.prepare(`UPDATE licence_keys SET user_id = ?1, last_activated_at = ?2
+          WHERE id = ?3 AND user_id IS NULL`).bind(userId, now, licence.id),
+      ]);
+      if (results[1].meta.changes !== 1) throw new HttpError(409, "This licence was activated by another device. Try again.");
+      user = { id: userId, display_name: displayName, role: "member", status: "active" };
+    }
+    if (user.status !== "active") throw new HttpError(403, "That licence has been revoked.", "invalid_licence");
+    await env.DB.prepare("UPDATE licence_keys SET last_activated_at = ?1 WHERE id = ?2").bind(now, licence.id).run();
   }
-  if (!user || !valid || user.status !== "active") {
-    await Promise.all([recordAttempt(env, usernameBucket, 5), recordAttempt(env, ipBucket, 25)]);
-    throw new HttpError(401, "The username or password is incorrect.", "invalid_credentials");
-  }
-  await env.DB.prepare("DELETE FROM auth_attempts WHERE bucket = ?1").bind(usernameBucket).run();
-  const device = await issueDevice(env, user.id, input.deviceName);
-  await audit(env, user.id, "auth.login", "device", device.deviceId);
+  await env.DB.prepare("DELETE FROM auth_attempts WHERE bucket = ?1").bind(ipBucket).run();
+  const device = await issueDevice(env, user.id, deviceName);
+  await audit(env, user.id, "licence.activate", licenceId ? "licence" : "owner", licenceId || user.id, { deviceId: device.deviceId });
   return json({ token: device.token, deviceId: device.deviceId, user: sessionUser(user) } satisfies DeviceSession, 201);
 }
 
@@ -205,207 +194,71 @@ async function logout(env: Env, actor: Principal) {
   return json({ loggedOut: true });
 }
 
-async function redeemInvite(request: Request, env: Env) {
-  const input = await body<{ inviteToken: string; username: string; credentialSecret: string; displayName?: string; deviceName: string }>(request);
-  const hash = await tokenHash(input.inviteToken || "", env.TOKEN_PEPPER);
-  const invite = await env.DB.prepare(`SELECT id, username, role, purpose, target_user_id, expires_at FROM invites
-    WHERE token_hash = ?1 AND redeemed_at IS NULL`).bind(hash).first<Record<string, string>>();
-  if (!invite || !invite.username || invite.expires_at <= isoNow()) {
-    throw new HttpError(403, "This invitation is invalid or has expired.");
-  }
-  const username = cleanUsername(input.username);
-  if (username !== invite.username.toLowerCase()) throw new HttpError(403, "This invitation does not match that username.");
-  const credentialHash = await tokenHash(cleanCredential(input.credentialSecret), env.TOKEN_PEPPER);
-  const now = isoNow();
-  let user: PasswordUser;
-  if (invite.purpose === "password_reset") {
-    user = await env.DB.prepare(`SELECT id, username, password_hash, password_salt, password_iterations,
-      password_scheme, display_name, role, status FROM users WHERE id = ?1 AND username = ?2 COLLATE NOCASE`)
-      .bind(invite.target_user_id, invite.username).first<PasswordUser>() as PasswordUser;
-    if (!user || user.status !== "active") throw new HttpError(403, "This invitation is invalid or has expired.");
-    const displayName = input.displayName ? cleanText(input.displayName, "Display name", 100) : user.display_name;
-    const results = await env.DB.batch([
-      env.DB.prepare("UPDATE invites SET redeemed_at = ?1, redeemed_by = ?2 WHERE id = ?3 AND redeemed_at IS NULL").bind(now, user.id, invite.id),
-      env.DB.prepare(`UPDATE users SET password_hash = ?1, password_salt = NULL, password_iterations = 600000,
-        password_scheme = 'client-pbkdf2-v1', display_name = ?2, updated_at = ?3 WHERE id = ?4`)
-        .bind(credentialHash, displayName, now, user.id),
-      env.DB.prepare("UPDATE devices SET status = 'revoked' WHERE user_id = ?1").bind(user.id),
-    ]);
-    if (results[0].meta.changes !== 1) throw new HttpError(409, "This invitation has already been redeemed.");
-    user = { ...user, display_name: displayName };
-  } else {
-    const displayName = cleanText(input.displayName, "Display name", 100);
-    await ensureUsernameAvailable(env, username);
-    const userId = crypto.randomUUID();
-    const results = await env.DB.batch([
-      env.DB.prepare("UPDATE invites SET redeemed_at = ?1 WHERE id = ?2 AND redeemed_at IS NULL").bind(now, invite.id),
-      env.DB.prepare(`INSERT INTO users (id, email, username, password_hash, password_salt, password_iterations,
-        password_scheme, display_name, role, status, created_at, updated_at)
-        VALUES (?1, ?2, ?3, ?4, NULL, 600000, 'client-pbkdf2-v1', ?5, ?6, 'active', ?7, ?7)`)
-        .bind(userId, internalEmail(userId), username, credentialHash, displayName, invite.role, now),
-    ]);
-    if (results[0].meta.changes !== 1) throw new HttpError(409, "This invitation has already been redeemed.");
-    await env.DB.prepare("UPDATE invites SET redeemed_by = ?1 WHERE id = ?2").bind(userId, invite.id).run();
-    user = { id: userId, username, password_hash: credentialHash, password_salt: null,
-      password_iterations: 600_000, password_scheme: "client-pbkdf2-v1",
-      display_name: displayName, role: invite.role as UserRole, status: "active" };
-  }
-  const device = await issueDevice(env, user.id, input.deviceName);
-  await audit(env, user.id, `invite.${invite.purpose}`, "invite", invite.id, { deviceId: device.deviceId });
-  return json({ token: device.token, deviceId: device.deviceId, user: sessionUser(user) } satisfies DeviceSession, 201);
-}
-
-async function validatePasswordReset(request: Request, env: Env) {
-  const input = await body<{ inviteToken: string; username: string }>(request);
-  const username = cleanUsername(input.username);
-  const hash = await tokenHash(input.inviteToken || "", env.TOKEN_PEPPER);
-  const invite = await env.DB.prepare(`SELECT invites.id FROM invites JOIN users ON users.id = invites.target_user_id
-    WHERE invites.token_hash = ?1 AND invites.purpose = 'password_reset' AND invites.redeemed_at IS NULL
-      AND invites.expires_at > ?2 AND users.username = ?3 COLLATE NOCASE AND users.status = 'active'`)
-    .bind(hash, isoNow(), username).first();
-  if (!invite) throw new HttpError(403, "That password-reset token is invalid or has expired.");
-  return json({ valid: true });
-}
-
-function accessRequest(row: Record<string, unknown>): AccessRequest {
+function licence(row: Record<string, unknown>): Licence {
   return {
     id: String(row.id),
-    username: String(row.username),
-    displayName: String(row.display_name),
-    status: String(row.status) as AccessRequest["status"],
-    createdAt: String(row.created_at),
-    reviewedAt: row.reviewed_at ? String(row.reviewed_at) : undefined,
-  };
-}
-
-async function requestAccess(request: Request, env: Env) {
-  const input = await body<{ username: string; displayName: string; credentialSecret: string }>(request);
-  const ip = request.headers.get("CF-Connecting-IP") || "unknown";
-  const requestBucket = await rateBucket(env, `access-request:ip:${ip}`);
-  await enforceRateLimit(env, [requestBucket], "Too many account requests were created from this connection. Try again tomorrow.");
-  const username = cleanUsername(input.username);
-  if (username === "admin") throw new HttpError(409, "The admin username is reserved for the owner.");
-  await ensureUsernameAvailable(env, username);
-  const existingRequest = await env.DB.prepare(`SELECT id FROM access_requests WHERE username = ?1 COLLATE NOCASE
-    AND status IN ('pending', 'approved')`).bind(username).first();
-  if (existingRequest) throw new HttpError(409, "That username already has an account request.");
-  const displayName = cleanText(input.displayName, "Display name", 100);
-  const credentialHash = await tokenHash(cleanCredential(input.credentialSecret), env.TOKEN_PEPPER);
-  const requestToken = randomToken();
-  const requestId = crypto.randomUUID();
-  const now = isoNow();
-  try {
-    await env.DB.prepare(`INSERT INTO access_requests (id, invite_id, username, display_name, credential_hash,
-      request_token_hash, status, created_at) VALUES (?1, NULL, ?2, ?3, ?4, ?5, 'pending', ?6)`)
-      .bind(requestId, username, displayName, credentialHash, await tokenHash(requestToken, env.TOKEN_PEPPER), now).run();
-  } catch {
-    throw new HttpError(409, "That username already has an account request.");
-  }
-  await recordAttempt(env, requestBucket, 5, 24 * 60 * 60_000);
-  await audit(env, null, "access_request.create", "access_request", requestId, { username });
-  return json({ ...accessRequest({ id: requestId, username, display_name: displayName, status: "pending", created_at: now }),
-    requestToken } satisfies CreatedAccessRequest, 201);
-}
-
-async function accessRequestStatus(request: Request, env: Env) {
-  const token = bearerToken(request);
-  if (!token) throw new HttpError(401, "The account request token is missing.");
-  const hash = await tokenHash(token, env.TOKEN_PEPPER);
-  const row = await env.DB.prepare(`SELECT id, username, display_name, status, created_at, reviewed_at
-    FROM access_requests WHERE request_token_hash = ?1`).bind(hash).first<Record<string, unknown>>();
-  if (!row) throw new HttpError(401, "The account request is no longer available.");
-  return json(accessRequest(row));
-}
-
-async function listAccessRequests(env: Env, actor: Principal) {
-  owner(actor);
-  const rows = await env.DB.prepare(`SELECT id, username, display_name, status, created_at, reviewed_at
-    FROM access_requests ORDER BY CASE status WHEN 'pending' THEN 0 ELSE 1 END, created_at DESC`).all<Record<string, unknown>>();
-  return json(rows.results.map(accessRequest));
-}
-
-async function reviewAccessRequest(request: Request, env: Env, actor: Principal, id: string) {
-  owner(actor);
-  const input = await body<{ decision: "approved" | "denied" }>(request);
-  if (input.decision !== "approved" && input.decision !== "denied") throw new HttpError(400, "Decision must be approved or denied.");
-  const pending = await env.DB.prepare(`SELECT id, username, display_name, credential_hash, status
-    FROM access_requests WHERE id = ?1`).bind(id).first<Record<string, string>>();
-  if (!pending) throw new HttpError(404, "Account request not found.");
-  if (pending.status !== "pending") throw new HttpError(409, "This account request has already been reviewed.");
-  const now = isoNow();
-  if (input.decision === "denied") {
-    const result = await env.DB.prepare(`UPDATE access_requests SET status = 'denied', reviewed_at = ?1, reviewed_by = ?2
-      WHERE id = ?3 AND status = 'pending'`).bind(now, actor.userId, id).run();
-    if (result.meta.changes !== 1) throw new HttpError(409, "This account request has already been reviewed.");
-  } else {
-    const username = cleanUsername(pending.username);
-    await ensureUsernameAvailable(env, username);
-    const userId = crypto.randomUUID();
-    const results = await env.DB.batch([
-      env.DB.prepare(`INSERT INTO users (id, email, username, password_hash, password_salt, password_iterations,
-        password_scheme, display_name, role, status, created_at, updated_at)
-        VALUES (?1, ?2, ?3, ?4, NULL, 600000, 'client-pbkdf2-v1', ?5, 'member', 'active', ?6, ?6)`)
-        .bind(userId, internalEmail(userId), username, pending.credential_hash, pending.display_name, now),
-      env.DB.prepare(`UPDATE access_requests SET status = 'approved', user_id = ?1, reviewed_at = ?2, reviewed_by = ?3
-        WHERE id = ?4 AND status = 'pending'`).bind(userId, now, actor.userId, id),
-    ]);
-    if (results[1].meta.changes !== 1) throw new HttpError(409, "This account request has already been reviewed.");
-  }
-  await audit(env, actor.userId, `access_request.${input.decision}`, "access_request", id, { username: pending.username });
-  return json({ updated: true });
-}
-
-async function createPasswordReset(env: Env, actor: Principal, id: string) {
-  owner(actor);
-  const user = await env.DB.prepare("SELECT id, username, role, status FROM users WHERE id = ?1").bind(id)
-    .first<{ id: string; username: string | null; role: UserRole; status: string }>();
-  if (!user?.username) throw new HttpError(404, "User not found or has no username.");
-  if (user.status !== "active") throw new HttpError(409, "Restore this account before resetting its password.");
-  const inviteId = crypto.randomUUID();
-  const token = randomToken();
-  const expiresAt = addDays(1);
-  await env.DB.prepare(`INSERT INTO invites (id, email, username, token_hash, role, purpose, target_user_id,
-    expires_at, created_by, created_at) VALUES (?1, ?2, ?3, ?4, ?5, 'password_reset', ?6, ?7, ?8, ?9)`)
-    .bind(inviteId, internalEmail(inviteId), user.username, await tokenHash(token, env.TOKEN_PEPPER), user.role,
-      user.id, expiresAt, actor.userId, isoNow()).run();
-  await audit(env, actor.userId, "password_reset.create", "user", user.id);
-  return json({ id: inviteId, username: user.username, role: user.role, purpose: "password_reset", expiresAt, token,
-    url: `${env.APP_BASE_URL}/invite/${token}` } satisfies CreatedInvite, 201);
-}
-
-async function listUsers(env: Env, actor: Principal) {
-  owner(actor);
-  const result = await env.DB.prepare(`SELECT users.id, users.username, users.display_name, users.role, users.status,
-    (SELECT COUNT(*) FROM devices WHERE devices.user_id = users.id AND devices.status = 'active') AS device_count,
-    (SELECT MAX(last_seen_at) FROM devices WHERE devices.user_id = users.id) AS last_seen_at,
-    (SELECT COUNT(*) FROM clips WHERE clips.owner_id = users.id AND clips.status = 'published' AND clips.expires_at > ?1) AS active_clip_count,
-    (SELECT COALESCE(SUM(size), 0) FROM clips WHERE clips.owner_id = users.id AND clips.status = 'published' AND clips.expires_at > ?1) AS active_bytes,
-    (SELECT COALESCE(SUM(quantity), 0) FROM usage_events WHERE usage_events.user_id = users.id AND usage_events.type = 'stored_bytes') AS uploaded_bytes
-    FROM users ORDER BY users.created_at`).bind(isoNow()).all();
-  return json(result.results.map((row) => ({
-    id: String(row.id),
-    username: row.username ? String(row.username) : "Not configured",
-    displayName: String(row.display_name),
-    role: String(row.role),
-    status: String(row.status),
+    keyHint: String(row.key_hint),
+    label: String(row.label),
+    status: String(row.status) as Licence["status"],
+    userId: row.user_id ? String(row.user_id) : undefined,
+    displayName: row.display_name ? String(row.display_name) : undefined,
     deviceCount: Number(row.device_count || 0),
-    lastSeenAt: row.last_seen_at ? String(row.last_seen_at) : undefined,
     activeClipCount: Number(row.active_clip_count || 0),
     activeBytes: Number(row.active_bytes || 0),
     uploadedBytes: Number(row.uploaded_bytes || 0),
-  })));
+    createdAt: String(row.created_at),
+    lastActivatedAt: row.last_activated_at ? String(row.last_activated_at) : undefined,
+    revokedAt: row.revoked_at ? String(row.revoked_at) : undefined,
+  };
 }
 
-async function updateUser(request: Request, env: Env, actor: Principal, id: string) {
+const licenceSelect = `SELECT licence_keys.*, users.display_name,
+  (SELECT COUNT(*) FROM devices WHERE devices.user_id = users.id AND devices.status = 'active') AS device_count,
+  (SELECT COUNT(*) FROM clips WHERE clips.owner_id = users.id AND clips.status = 'published' AND clips.expires_at > ?1) AS active_clip_count,
+  (SELECT COALESCE(SUM(size), 0) FROM clips WHERE clips.owner_id = users.id AND clips.status = 'published' AND clips.expires_at > ?1) AS active_bytes,
+  (SELECT COALESCE(SUM(quantity), 0) FROM usage_events WHERE usage_events.user_id = users.id AND usage_events.type = 'stored_bytes') AS uploaded_bytes
+  FROM licence_keys LEFT JOIN users ON users.id = licence_keys.user_id`;
+
+async function listLicences(env: Env, actor: Principal) {
+  owner(actor);
+  const rows = await env.DB.prepare(`${licenceSelect} ORDER BY licence_keys.created_at DESC`).bind(isoNow()).all<Record<string, unknown>>();
+  return json(rows.results.map(licence));
+}
+
+async function createLicence(request: Request, env: Env, actor: Principal) {
+  owner(actor);
+  const input = await body<{ label: string }>(request);
+  const label = cleanText(input.label, "Licence label", 100);
+  const key = `CE-${randomToken(24)}`;
+  const id = crypto.randomUUID();
+  const now = isoNow();
+  const keyHint = `••••-${key.slice(-6)}`;
+  await env.DB.prepare(`INSERT INTO licence_keys (id, token_hash, key_hint, label, status, created_by, created_at)
+    VALUES (?1, ?2, ?3, ?4, 'active', ?5, ?6)`)
+    .bind(id, await tokenHash(key, env.TOKEN_PEPPER), keyHint, label, actor.userId, now).run();
+  await audit(env, actor.userId, "licence.create", "licence", id, { label, keyHint });
+  return json({ ...licence({ id, key_hint: keyHint, label, status: "active", created_at: now }), key } satisfies CreatedLicence, 201);
+}
+
+async function updateLicence(request: Request, env: Env, actor: Principal, id: string) {
   owner(actor);
   const input = await body<{ status: "active" | "revoked" }>(request);
   if (input.status !== "active" && input.status !== "revoked") throw new HttpError(400, "Status must be active or revoked.");
-  if (id === actor.userId && input.status === "revoked") throw new HttpError(409, "You cannot revoke your current owner account.");
+  const existing = await env.DB.prepare("SELECT id, user_id FROM licence_keys WHERE id = ?1").bind(id)
+    .first<{ id: string; user_id: string | null }>();
+  if (!existing) throw new HttpError(404, "Licence not found.");
   const now = isoNow();
-  const statements = [env.DB.prepare("UPDATE users SET status = ?1, updated_at = ?2 WHERE id = ?3").bind(input.status, now, id)];
-  if (input.status === "revoked") statements.push(env.DB.prepare("UPDATE devices SET status = 'revoked' WHERE user_id = ?1").bind(id));
+  const statements = [env.DB.prepare(`UPDATE licence_keys SET status = ?1, revoked_at = ?2 WHERE id = ?3`)
+    .bind(input.status, input.status === "revoked" ? now : null, id)];
+  if (existing.user_id) {
+    statements.push(env.DB.prepare("UPDATE users SET status = ?1, updated_at = ?2 WHERE id = ?3")
+      .bind(input.status, now, existing.user_id));
+    if (input.status === "revoked") {
+      statements.push(env.DB.prepare("UPDATE devices SET status = 'revoked' WHERE user_id = ?1").bind(existing.user_id));
+    }
+  }
   await env.DB.batch(statements);
-  await audit(env, actor.userId, `user.${input.status}`, "user", id);
+  await audit(env, actor.userId, `licence.${input.status}`, "licence", id);
   return json({ updated: true });
 }
 
@@ -570,29 +423,6 @@ async function publicShare(env: Env, slug: string) {
   } });
 }
 
-async function inviteLanding(env: Env, token: string) {
-  const invite = await env.DB.prepare(`SELECT username, purpose, expires_at, redeemed_at FROM invites WHERE token_hash = ?1`)
-    .bind(await tokenHash(token, env.TOKEN_PEPPER)).first<{ username: string | null; purpose: string; expires_at: string; redeemed_at: string | null }>();
-  const available = invite && !invite.redeemed_at && invite.expires_at > isoNow();
-  const reset = available && invite.purpose === "password_reset";
-  const heading = !available ? "This private link is no longer available" : reset ? "Reset your Clip Engine password" : "Account requests have changed";
-  const instructions = !available
-    ? "Ask the owner to create another link."
-    : reset
-      ? `Open Clip Engine, choose <strong>Sign in</strong>, then <strong>Forgot my password</strong>. Enter the username <strong>@${invite.username}</strong> and paste this entire link.`
-      : "Open Clip Engine and choose <strong>Create account</strong>. Join links are no longer required; your request will wait for owner approval before you can publish.";
-  return new Response(`<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-    <title>Clip Engine invitation</title><style>html{color-scheme:dark}body{margin:0;min-height:100vh;display:grid;place-items:center;background:#090a0d;color:#e5e7eb;font:16px system-ui}main{width:min(520px,calc(100% - 48px));padding:32px;border:1px solid #343842;border-radius:14px;background:#111319;box-shadow:0 24px 80px #0008}b{color:#c7ff3d}p{color:#a4a8b1;line-height:1.6}code{display:block;padding:14px;border-radius:8px;background:#08090b;color:#d3ff63;overflow-wrap:anywhere}</style>
-    <main><b>Private ${reset ? "password-reset" : "join"} link</b><h1>${heading}</h1><p>${instructions}</p>${available ? `<code>${env.APP_BASE_URL}/invite/${token}</code>` : ""}</main></html>`, {
-    headers: {
-      "content-type": "text/html; charset=utf-8",
-      "cache-control": "no-store",
-      "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'",
-      "x-frame-options": "DENY",
-    },
-  });
-}
-
 async function route(request: Request, env: Env) {
   const url = new URL(request.url);
   const path = url.pathname.replace(/\/+$/, "") || "/";
@@ -604,31 +434,20 @@ async function route(request: Request, env: Env) {
   if (request.method === "GET" && path === "/health") return json({ status: "ok", version: "1.0.0" });
   const shareMatch = path.match(/^\/c\/([A-Za-z0-9_-]+)$/);
   if (request.method === "GET" && shareMatch) return publicShare(env, shareMatch[1]);
-  const inviteMatch = path.match(/^\/invite\/([A-Za-z0-9_-]+)$/);
-  if (request.method === "GET" && inviteMatch) return inviteLanding(env, inviteMatch[1]);
-  if (request.method === "POST" && path === "/v1/auth/login") return login(request, env);
-  if (request.method === "POST" && path === "/v1/auth/redeem") return redeemInvite(request, env);
-  if (request.method === "POST" && path === "/v1/auth/password-reset/validate") return validatePasswordReset(request, env);
-  if (request.method === "POST" && path === "/v1/access-requests") return requestAccess(request, env);
-  if (request.method === "GET" && path === "/v1/access-requests/me") return accessRequestStatus(request, env);
+  if (request.method === "POST" && path === "/v1/auth/licence") return activateLicence(request, env);
 
   const actor = await principal(request, env);
   if (request.method === "GET" && path === "/v1/me") return json({
     id: actor.userId,
-    username: actor.username,
     displayName: actor.displayName,
     role: actor.role,
     status: "active",
   });
   if (request.method === "POST" && path === "/v1/auth/logout") return logout(env, actor);
-  if (request.method === "GET" && path === "/v1/access-requests") return listAccessRequests(env, actor);
-  const requestMatch = path.match(/^\/v1\/access-requests\/([0-9a-f-]+)$/i);
-  if (request.method === "PATCH" && requestMatch) return reviewAccessRequest(request, env, actor, requestMatch[1]);
-  if (request.method === "GET" && path === "/v1/users") return listUsers(env, actor);
-  const userMatch = path.match(/^\/v1\/users\/([0-9a-f-]+)$/i);
-  if (request.method === "PATCH" && userMatch) return updateUser(request, env, actor, userMatch[1]);
-  const resetMatch = path.match(/^\/v1\/users\/([0-9a-f-]+)\/password-reset$/i);
-  if (request.method === "POST" && resetMatch) return createPasswordReset(env, actor, resetMatch[1]);
+  if (request.method === "GET" && path === "/v1/licences") return listLicences(env, actor);
+  if (request.method === "POST" && path === "/v1/licences") return createLicence(request, env, actor);
+  const licenceMatch = path.match(/^\/v1\/licences\/([0-9a-f-]+)$/i);
+  if (request.method === "PATCH" && licenceMatch) return updateLicence(request, env, actor, licenceMatch[1]);
   if (request.method === "POST" && path === "/v1/uploads") return createUpload(request, env, actor);
   const completeMatch = path.match(/^\/v1\/uploads\/([0-9a-f-]+)\/complete$/i);
   if (request.method === "POST" && completeMatch) return completeUpload(request, env, actor, completeMatch[1]);

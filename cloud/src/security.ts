@@ -31,9 +31,12 @@ export async function authenticate(request: Request, env: Env): Promise<Principa
   if (!token) return null;
   const hash = await tokenHash(token, env.TOKEN_PEPPER);
   const row = await env.DB.prepare(`
-    SELECT users.id AS user_id, devices.id AS device_id, devices.last_seen_at, users.username, users.display_name, users.role
+    SELECT users.id AS user_id, devices.id AS device_id, devices.last_seen_at, users.display_name, users.role
     FROM devices JOIN users ON users.id = devices.user_id
     WHERE devices.token_hash = ?1 AND devices.status = 'active' AND users.status = 'active'
+      AND (users.role = 'owner' OR EXISTS (
+        SELECT 1 FROM licence_keys WHERE licence_keys.user_id = users.id AND licence_keys.status = 'active'
+      ))
   `).bind(hash).first<Record<string, string>>();
   if (!row) return null;
   const now = new Date().toISOString();
@@ -44,7 +47,6 @@ export async function authenticate(request: Request, env: Env): Promise<Principa
   return {
     userId: row.user_id,
     deviceId: row.device_id,
-    username: row.username || "",
     displayName: row.display_name,
     role: row.role as Principal["role"],
   };

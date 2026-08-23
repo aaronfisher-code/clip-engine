@@ -1,4 +1,3 @@
-pub mod auth;
 pub mod cloud;
 pub mod database;
 pub mod engine;
@@ -12,7 +11,7 @@ pub mod updater;
 /// Crate, identifier, and data-dir names stay `clip-engine`.
 pub const PRODUCT_NAME: &str = "Dabs Clip Engine";
 
-/// Shorter name for sentences where "Dabs Clip Engine" is awkward ("your Clip Engine login").
+/// Shorter name for sentences where the full product name is awkward.
 pub const APP_NAME: &str = "Clip Engine";
 
 pub use clip_engine_recorder_protocol::*;

@@ -1,6 +1,5 @@
 use crate::cloud::{
-    self, AccessRequest, AdminUser, CloudClient, CloudClip, CloudUser, DeviceSession,
-    PasswordReset, UploadIntent,
+    self, CloudClient, CloudClip, CloudUser, CreatedLicence, DeviceSession, Licence, UploadIntent,
 };
 use crate::database::Database;
 use crate::media;
@@ -84,7 +83,6 @@ impl Engine {
         Ok(AppConfig {
             source_directory: self.source_directory().to_string_lossy().to_string(),
             authenticated: self.cloud.authenticated(),
-            pending_access_request: self.cloud.pending_access_request(),
             r2_configured: self.cloud.authenticated(),
             public_base_url: Some("https://clips.dab.dev".into()),
             api_base_url: self.database.setting("api_base_url")?.unwrap_or_else(|| {
@@ -403,7 +401,7 @@ impl Engine {
         selection: Selection,
     ) -> anyhow::Result<PublishJob> {
         if !self.cloud.authenticated() {
-            anyhow::bail!("Sign in with an invitation before publishing.");
+            anyhow::bail!("Enter a valid licence key before publishing.");
         }
         let clip = self
             .database
@@ -485,57 +483,14 @@ impl Engine {
         Ok(output)
     }
 
-    pub async fn login(
+    pub async fn activate_licence(
         &self,
-        username: &str,
-        password: &str,
-        device_name: &str,
-    ) -> anyhow::Result<DeviceSession> {
-        let secret = crate::auth::credential_secret(username, password);
-        let owner_token = username
-            .trim()
-            .eq_ignore_ascii_case("admin")
-            .then_some(password);
-        self.cloud
-            .login(username, &secret, owner_token, device_name)
-            .await
-    }
-
-    pub async fn request_access(
-        &self,
-        username: &str,
-        display_name: &str,
-        password: &str,
-    ) -> anyhow::Result<AccessRequest> {
-        let secret = crate::auth::credential_secret(username, password);
-        self.cloud
-            .request_access(username, display_name, &secret)
-            .await
-    }
-
-    pub async fn redeem_invite(
-        &self,
-        invite: &str,
-        username: &str,
-        password: &str,
+        licence_key: &str,
         display_name: &str,
         device_name: &str,
     ) -> anyhow::Result<DeviceSession> {
-        let secret = crate::auth::credential_secret(username, password);
         self.cloud
-            .redeem(
-                &crate::auth::invite_token(invite),
-                username,
-                &secret,
-                display_name,
-                device_name,
-            )
-            .await
-    }
-
-    pub async fn validate_password_reset(&self, token: &str, username: &str) -> anyhow::Result<()> {
-        self.cloud
-            .validate_password_reset(&crate::auth::invite_token(token), username)
+            .activate_licence(licence_key, display_name, device_name)
             .await
     }
 
@@ -555,32 +510,16 @@ impl Engine {
         Ok(self.cloud.extend_clip(id).await?.expires_at)
     }
 
-    pub async fn access_request_status(&self) -> anyhow::Result<AccessRequest> {
-        self.cloud.access_request_status().await
+    pub async fn licences(&self) -> anyhow::Result<Vec<Licence>> {
+        self.cloud.licences().await
     }
 
-    pub fn clear_access_request(&self) -> anyhow::Result<()> {
-        self.cloud.clear_access_request()
+    pub async fn create_licence(&self, label: &str) -> anyhow::Result<CreatedLicence> {
+        self.cloud.create_licence(label).await
     }
 
-    pub async fn admin_users(&self) -> anyhow::Result<Vec<AdminUser>> {
-        self.cloud.users().await
-    }
-
-    pub async fn admin_access_requests(&self) -> anyhow::Result<Vec<AccessRequest>> {
-        self.cloud.access_requests().await
-    }
-
-    pub async fn review_access_request(&self, id: &str, decision: &str) -> anyhow::Result<()> {
-        self.cloud.review_access_request(id, decision).await
-    }
-
-    pub async fn create_password_reset(&self, id: &str) -> anyhow::Result<PasswordReset> {
-        self.cloud.create_password_reset(id).await
-    }
-
-    pub async fn set_user_status(&self, id: &str, status: &str) -> anyhow::Result<()> {
-        self.cloud.set_user_status(id, status).await
+    pub async fn set_licence_status(&self, id: &str, status: &str) -> anyhow::Result<()> {
+        self.cloud.set_licence_status(id, status).await
     }
 }
 

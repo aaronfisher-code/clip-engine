@@ -16,7 +16,6 @@ export interface Env {
 export type Principal = {
   userId: string;
   deviceId: string;
-  username: string;
   displayName: string;
   role: "owner" | "member";
 };

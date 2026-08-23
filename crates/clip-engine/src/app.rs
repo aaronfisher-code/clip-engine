@@ -3,7 +3,7 @@ use crate::startup;
 use crate::theme;
 use crate::tray::{TrayAction, TrayController};
 use crate::window_state::WindowPersistence;
-use clip_engine_core::cloud::{AccessRequest, AdminUser, CloudClip, CloudUser, PasswordReset};
+use clip_engine_core::cloud::{CloudClip, CloudUser, CreatedLicence, Licence};
 use clip_engine_core::models::{AppConfig, Clip, PublishJob, Selection};
 use clip_engine_core::paths::{default_inbox_dir, video_dir};
 use clip_engine_core::{
@@ -33,17 +33,10 @@ const RECORDER_LOGIN_RETRY_DELAYS: [Duration; RECORDER_LOGIN_START_ATTEMPTS - 1]
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum AuthMode {
-    Request,
-    Login,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
 enum AccessFilter {
-    Pending,
+    Available,
     Active,
     Revoked,
-    Denied,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -60,9 +53,8 @@ enum Message {
     User(CloudUser),
     LoggedOut,
     CloudClips(Vec<CloudClip>),
-    AccessRequest(Option<AccessRequest>),
-    Admin(Vec<AdminUser>, Vec<AccessRequest>),
-    PasswordReset(PasswordReset),
+    Admin(Vec<Licence>),
+    LicenceCreated(CreatedLicence, Vec<Licence>),
     Busy(bool),
     ExportProgress(f64),
     ExportDone(PathBuf),
@@ -161,15 +153,14 @@ pub struct ClipApp {
     selected_id: Option<String>,
     library_open: bool,
     user: Option<CloudUser>,
-    access_request: Option<AccessRequest>,
-    show_auth: Option<AuthMode>,
+    show_auth: bool,
     show_access: bool,
     account_open: bool,
-    admin_users: Vec<AdminUser>,
-    admin_requests: Vec<AccessRequest>,
+    admin_licences: Vec<Licence>,
     access_filter: AccessFilter,
     access_query: String,
-    created_reset: Option<PasswordReset>,
+    created_licence: Option<CreatedLicence>,
+    licence_label: String,
     pending_delete_job: Option<String>,
     pending_delete_clip: Option<String>,
     publish_modal: Option<PublishModal>,
@@ -184,12 +175,8 @@ pub struct ClipApp {
     last_refresh: Instant,
     tx: Sender<Message>,
     rx: Receiver<Message>,
-    auth_username: String,
+    licence_key: String,
     auth_display: String,
-    auth_password: String,
-    auth_confirm: String,
-    reset_token: String,
-    forgot_step: u8,
     player_error: Option<String>,
     device_name: String,
     session_media: Option<String>,
@@ -200,7 +187,6 @@ pub struct ClipApp {
     available_update: Option<AvailableUpdate>,
     update_modal: Option<UpdateModal>,
     update_checking: bool,
-    show_pending: bool,
     show_recorder: bool,
     recorder_config: RecorderConfig,
     recorder_capabilities: RecorderCapabilities,
@@ -232,7 +218,6 @@ impl ClipApp {
         let config = engine.config().unwrap_or_else(|_| AppConfig {
             source_directory: String::new(),
             authenticated: false,
-            pending_access_request: false,
             r2_configured: false,
             public_base_url: Some("https://clips.dab.dev".into()),
             api_base_url: "https://api.clips.dab.dev".into(),
@@ -285,15 +270,14 @@ impl ClipApp {
                     selected_id,
                     library_open: true,
                     user: None,
-                    access_request: None,
-                    show_auth: Some(AuthMode::Request),
+                    show_auth: false,
                     show_access: false,
                     account_open: false,
-                    admin_users: Vec::new(),
-                    admin_requests: Vec::new(),
-                    access_filter: AccessFilter::Pending,
+                    admin_licences: Vec::new(),
+                    access_filter: AccessFilter::Available,
                     access_query: String::new(),
-                    created_reset: None,
+                    created_licence: None,
+                    licence_label: String::new(),
                     pending_delete_job: None,
                     pending_delete_clip: None,
                     publish_modal: None,
@@ -308,12 +292,8 @@ impl ClipApp {
                     last_refresh: Instant::now(),
                     tx,
                     rx,
-                    auth_username: String::new(),
+                    licence_key: String::new(),
                     auth_display: String::new(),
-                    auth_password: String::new(),
-                    auth_confirm: String::new(),
-                    reset_token: String::new(),
-                    forgot_step: 0,
                     device_name: format!("{} desktop", std::env::consts::OS),
                     session_media: None,
                     timeline_drag: None,
@@ -323,7 +303,6 @@ impl ClipApp {
                     available_update: None,
                     update_modal: None,
                     update_checking: false,
-                    show_pending: false,
                     show_recorder: false,
                     recorder_config: config.recorder.clone(),
                     recorder_capabilities: recorder_capabilities.clone(),
@@ -364,15 +343,14 @@ impl ClipApp {
             selected_id,
             library_open: true,
             user: None,
-            access_request: None,
-            show_auth: None,
+            show_auth: false,
             show_access: false,
             account_open: false,
-            admin_users: Vec::new(),
-            admin_requests: Vec::new(),
-            access_filter: AccessFilter::Pending,
+            admin_licences: Vec::new(),
+            access_filter: AccessFilter::Available,
             access_query: String::new(),
-            created_reset: None,
+            created_licence: None,
+            licence_label: String::new(),
             pending_delete_job: None,
             pending_delete_clip: None,
             publish_modal: None,
@@ -387,12 +365,8 @@ impl ClipApp {
             last_refresh: Instant::now(),
             tx,
             rx,
-            auth_username: String::new(),
+            licence_key: String::new(),
             auth_display: String::new(),
-            auth_password: String::new(),
-            auth_confirm: String::new(),
-            reset_token: String::new(),
-            forgot_step: 0,
             player_error: None,
             device_name: format!("{} desktop", std::env::consts::OS),
             session_media: None,
@@ -403,7 +377,6 @@ impl ClipApp {
             available_update: None,
             update_modal: None,
             update_checking: false,
-            show_pending: false,
             show_recorder: false,
             recorder_config: config.recorder.clone(),
             recorder_capabilities,
@@ -458,27 +431,11 @@ impl ClipApp {
                         let _ = engine.logout().await;
                         let _ = tx.send(Message::LoggedOut);
                         let _ = tx.send(Message::Notice(
-                            "Your saved login expired. Sign in again to publish.".into(),
+                            "Your publishing licence is no longer active. Enter a licence key to publish again.".into(),
                         ));
                     }
                 }
             });
-        } else if self.config.pending_access_request {
-            let engine = self.engine.clone();
-            let tx = self.tx.clone();
-            self.engine.spawn(async move {
-                match engine.access_request_status().await {
-                    Ok(request) => {
-                        let _ = tx.send(Message::AccessRequest(Some(request)));
-                    }
-                    Err(_) => {
-                        let _ = engine.clear_access_request();
-                        let _ = tx.send(Message::AccessRequest(None));
-                    }
-                }
-            });
-        } else {
-            self.show_auth = Some(AuthMode::Request);
         }
     }
 
@@ -585,6 +542,12 @@ impl ClipApp {
         while let Ok(message) = self.rx.try_recv() {
             match message {
                 Message::Error(value) => {
+                    if value.contains("publishing licence is no longer valid") {
+                        self.user = None;
+                        self.cloud_clips.clear();
+                        self.show_auth = true;
+                        self.config = self.engine.config().unwrap_or(self.config.clone());
+                    }
                     self.set_error(value);
                     self.busy = false;
                     self.recorder_loading = false;
@@ -621,41 +584,29 @@ impl ClipApp {
                 }
                 Message::User(user) => {
                     self.user = Some(user);
-                    self.show_auth = None;
-                    self.access_request = None;
-                    self.show_pending = false;
+                    self.show_auth = false;
+                    self.licence_key.clear();
+                    self.auth_display.clear();
                     self.config = self.engine.config().unwrap_or(self.config.clone());
                     self.busy = false;
                 }
                 Message::LoggedOut => {
                     self.user = None;
-                    self.access_request = None;
-                    self.show_pending = false;
                     self.cloud_clips.clear();
-                    self.show_auth = Some(AuthMode::Login);
+                    self.show_auth = false;
                     self.config = self.engine.config().unwrap_or(self.config.clone());
                     self.busy = false;
                 }
                 Message::CloudClips(clips) => self.cloud_clips = clips,
-                Message::AccessRequest(request) => {
-                    self.access_request = request;
-                    if self.access_request.is_none() {
-                        self.show_pending = false;
-                        self.show_auth = Some(AuthMode::Request);
-                    } else {
-                        self.show_pending = true;
-                    }
-                    self.config = self.engine.config().unwrap_or(self.config.clone());
-                    self.busy = false;
-                }
-                Message::Admin(users, requests) => {
-                    self.admin_users = users;
-                    self.admin_requests = requests;
+                Message::Admin(licences) => {
+                    self.admin_licences = licences;
                     self.show_access = true;
                     self.busy = false;
                 }
-                Message::PasswordReset(reset) => {
-                    self.created_reset = Some(reset);
+                Message::LicenceCreated(licence, licences) => {
+                    self.created_licence = Some(licence);
+                    self.admin_licences = licences;
+                    self.licence_label.clear();
                     self.busy = false;
                 }
                 Message::Busy(busy) => self.busy = busy,
@@ -1000,34 +951,23 @@ impl eframe::App for ClipApp {
                                 .as_ref()
                                 .map(|user| user.display_name.clone())
                                 .unwrap_or_else(|| "Connected".into())
-                        } else if self
-                            .access_request
-                            .as_ref()
-                            .is_some_and(|request| request.status == "pending")
-                        {
-                            "Approval pending".into()
                         } else {
-                            "Sign in to publish".into()
+                            "Publishing licence".into()
                         };
                         if ui.button(label).clicked() {
                             if self.config.authenticated {
                                 self.account_open = !self.account_open;
-                            } else if self.access_request.is_some() {
-                                self.show_pending = true;
                             } else {
-                                self.show_auth = Some(AuthMode::Login);
+                                self.show_auth = true;
                             }
                         }
                         if self.user.as_ref().is_some_and(|user| user.role == "owner")
                             && ui.button("Manage access").clicked()
                         {
                             let engine = self.engine.clone();
-                            self.run_async(async move {
-                                Ok(Message::Admin(
-                                    engine.admin_users().await?,
-                                    engine.admin_access_requests().await?,
-                                ))
-                            });
+                            self.run_async(
+                                async move { Ok(Message::Admin(engine.licences().await?)) },
+                            );
                         }
                         if ui
                             .button("Recorder")
@@ -1047,10 +987,8 @@ impl eframe::App for ClipApp {
                     if let Some(user) = self.user.clone() {
                         ui.add_space(6.0);
                         ui.horizontal(|ui| {
-                            ui.label(
-                                RichText::new(format!("@{}", user.username)).color(theme::MUTED),
-                            );
-                            if ui.button("Sign out this device").clicked() {
+                            ui.label(RichText::new(&user.role).color(theme::MUTED));
+                            if ui.button("Remove licence from this device").clicked() {
                                 self.sign_out_this_device();
                             }
                             let update_label = if self.available_update.is_some() {
@@ -1113,21 +1051,14 @@ impl eframe::App for ClipApp {
                 }
             });
 
-        if self.show_auth.is_some() {
+        if self.show_auth {
             self.auth_modal(&ctx);
-        }
-        if self.show_pending
-            && self.access_request.is_some()
-            && !self.config.authenticated
-            && self.show_auth.is_none()
-        {
-            self.pending_modal(&ctx);
         }
         if self.show_access {
             self.access_modal(&ctx);
         }
-        if self.created_reset.is_some() {
-            self.reset_modal(&ctx);
+        if self.created_licence.is_some() {
+            self.created_licence_modal(&ctx);
         }
         if self.pending_delete_job.is_some() {
             self.delete_version_modal(&ctx);
@@ -3748,7 +3679,6 @@ impl ClipApp {
                         && self.publish_modal.is_none()
                         && self.export_modal.is_none();
                     let can_publish = can_export
-                        && self.config.authenticated
                         && selected.is_some_and(PublishOption::within_publish_limit);
                     ui.horizontal(|ui| {
                         let gap = ui.spacing().item_spacing.x;
@@ -3773,13 +3703,17 @@ impl ClipApp {
                         );
                         if !self.config.authenticated {
                             publish_response =
-                                publish_response.on_hover_text("Sign in to publish a share link.");
+                                publish_response.on_hover_text("Enter a licence key to publish a share link.");
                         } else if selected.is_some_and(|option| !option.within_publish_limit()) {
                             publish_response = publish_response.on_hover_text(
                                 "This quality is over 200 MB. Choose a lower quality or shorten the trim to publish.",
                             );
                         }
                         if publish_response.clicked() {
+                            if !self.config.authenticated {
+                                self.show_auth = true;
+                                return;
+                            }
                             if let (Some(editor), Some(option)) = (&self.editor, selected) {
                                 self.publish_modal = Some(PublishModal::Name {
                                     clip_id: clip.id.clone(),
@@ -4117,249 +4051,110 @@ impl ClipApp {
 
     fn auth_modal(&mut self, ctx: &egui::Context) {
         let mut open = true;
-        egui::Window::new(match self.forgot_step {
-            1 => "Forgot your password?",
-            2 => "Choose a new password",
-            _ if self.show_auth == Some(AuthMode::Login) => "Sign in",
-            _ => "Create account",
-        })
-        .collapsible(false)
-        .resizable(false)
-        .open(&mut open)
-        .show(ctx, |ui| {
-            if self.forgot_step == 0 {
-                ui.horizontal(|ui| {
-                    if ui
-                        .selectable_label(
-                            self.show_auth == Some(AuthMode::Request),
-                            "Create account",
-                        )
-                        .clicked()
-                    {
-                        self.show_auth = Some(AuthMode::Request);
-                    }
-                    if ui
-                        .selectable_label(self.show_auth == Some(AuthMode::Login), "Sign in")
-                        .clicked()
-                    {
-                        self.show_auth = Some(AuthMode::Login);
-                    }
-                });
-                ui.label("Username");
-                ui.text_edit_singleline(&mut self.auth_username);
-                if self.show_auth == Some(AuthMode::Request) {
-                    ui.label("Display name");
-                    ui.text_edit_singleline(&mut self.auth_display);
-                }
-                ui.label("Password");
-                ui.add(egui::TextEdit::singleline(&mut self.auth_password).password(true));
-                if self.show_auth == Some(AuthMode::Request) {
-                    ui.label("Confirm password");
-                    ui.add(egui::TextEdit::singleline(&mut self.auth_confirm).password(true));
-                }
-                if self.show_auth == Some(AuthMode::Login)
-                    && ui.link("Forgot my password").clicked()
-                {
-                    self.forgot_step = 1;
-                }
-                let access_pending = self
-                    .access_request
-                    .as_ref()
-                    .is_some_and(|request| request.status == "pending");
-                let request_label = if access_pending {
-                    "Awaiting owner approval"
-                } else if self.busy {
-                    "Access requested"
-                } else {
-                    "Request access"
-                };
+        egui::Window::new("Publishing licence")
+            .collapsible(false)
+            .resizable(false)
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.set_width(360.0);
+                ui.label(
+                    RichText::new("Enter the licence key you received from the owner. No account, email, or password is required.")
+                        .color(theme::MUTED)
+                        .size(12.5),
+                );
+                ui.add_space(8.0);
+                ui.label("Licence key");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.licence_key)
+                        .desired_width(ui.available_width())
+                        .hint_text("CE-…"),
+                );
+                ui.label("Display name");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.auth_display)
+                        .desired_width(ui.available_width())
+                        .char_limit(100),
+                );
+                ui.label(
+                    RichText::new("This name is shown beside clips published with this licence.")
+                        .color(theme::MUTED)
+                        .size(11.5),
+                );
+                ui.add_space(8.0);
+                let can_activate = !self.busy
+                    && !self.licence_key.trim().is_empty()
+                    && !self.auth_display.trim().is_empty();
                 if ui
-                    .add_enabled(
-                        !self.busy && !access_pending,
-                        egui::Button::new(if self.show_auth == Some(AuthMode::Login) {
-                            "Sign in"
-                        } else {
-                            request_label
-                        }),
-                    )
+                    .add_enabled(can_activate, egui::Button::new("Activate publishing"))
                     .clicked()
                 {
                     self.submit_auth();
                 }
-                if self.show_auth == Some(AuthMode::Request) && (self.busy || access_pending) {
-                    ui.label(
-                        egui::RichText::new("Your request is pending owner approval.")
-                            .color(theme::MUTED)
-                            .size(12.0),
-                    );
-                    if access_pending && ui.button("Sign out this device").clicked() {
-                        self.sign_out_this_device();
-                    }
-                }
-            } else if self.forgot_step == 1 {
-                ui.label("Username");
-                ui.text_edit_singleline(&mut self.auth_username);
-                ui.label("Forgotten-password token");
-                ui.text_edit_multiline(&mut self.reset_token);
-                ui.horizontal(|ui| {
-                    if ui.button("Back").clicked() {
-                        self.forgot_step = 0;
-                    }
-                    if ui.button("Continue").clicked() {
-                        let engine = self.engine.clone();
-                        let token = self.reset_token.clone();
-                        let username = self.auth_username.clone();
-                        let tx = self.tx.clone();
-                        self.busy = true;
-                        self.engine.spawn(async move {
-                            match engine.validate_password_reset(&token, &username).await {
-                                Ok(()) => {
-                                    let _ = tx.send(Message::Notice(
-                                        "Token is valid. Choose a new password.".into(),
-                                    ));
-                                }
-                                Err(error) => {
-                                    let _ = tx.send(Message::Error(format!("{error:#}")));
-                                }
-                            }
-                        });
-                        self.forgot_step = 2;
-                    }
-                });
-            } else {
-                ui.label("New password");
-                ui.add(egui::TextEdit::singleline(&mut self.auth_password).password(true));
-                ui.label("Confirm new password");
-                ui.add(egui::TextEdit::singleline(&mut self.auth_confirm).password(true));
-                if ui.button("Reset password and sign in").clicked() {
-                    if self.auth_password != self.auth_confirm {
-                        self.set_error("Passwords do not match.");
-                    } else {
-                        let engine = self.engine.clone();
-                        let token = self.reset_token.clone();
-                        let username = self.auth_username.clone();
-                        let password = self.auth_password.clone();
-                        let device = self.device_name.clone();
-                        self.run_async(async move {
-                            Ok(Message::User(
-                                engine
-                                    .redeem_invite(&token, &username, &password, "", &device)
-                                    .await?
-                                    .user,
-                            ))
-                        });
-                    }
-                }
-            }
-        });
+            });
         if !open {
-            self.show_auth = None;
+            self.show_auth = false;
         }
     }
 
     fn submit_auth(&mut self) {
-        if self.show_auth == Some(AuthMode::Request) && self.auth_password != self.auth_confirm {
-            self.set_error("Passwords do not match.");
-            return;
-        }
         let engine = self.engine.clone();
-        let username = self.auth_username.clone();
-        let password = self.auth_password.clone();
+        let licence_key = self.licence_key.clone();
         let display = self.auth_display.clone();
         let device = self.device_name.clone();
-        if self.show_auth == Some(AuthMode::Login) {
-            self.run_async(async move {
-                Ok(Message::User(
-                    engine.login(&username, &password, &device).await?.user,
-                ))
-            });
-        } else {
-            self.run_async(async move {
-                let request = engine
-                    .request_access(&username, &display, &password)
-                    .await?;
-                Ok(Message::AccessRequest(Some(request)))
-            });
-        }
+        self.run_async(async move {
+            Ok(Message::User(
+                engine
+                    .activate_licence(&licence_key, &display, &device)
+                    .await?
+                    .user,
+            ))
+        });
     }
 
     fn sign_out_this_device(&mut self) {
         let engine = self.engine.clone();
         self.account_open = false;
-        self.show_pending = false;
-        self.access_request = None;
-        self.show_auth = None;
+        self.show_auth = false;
         self.run_async(async move {
             engine.logout().await?;
             Ok(Message::LoggedOut)
         });
     }
 
-    fn pending_modal(&mut self, ctx: &egui::Context) {
-        let Some(request) = self.access_request.clone() else {
-            return;
-        };
-        let mut open = true;
-        egui::Window::new("Publishing access status")
-            .collapsible(false)
-            .resizable(false)
-            .open(&mut open)
-            .show(ctx, |ui| {
-                ui.label(format!("@{}", request.username));
-                match request.status.as_str() {
-                    "approved" => {
-                        ui.heading("Your access was approved");
-                        if ui.button("Sign in").clicked() {
-                            self.show_pending = false;
-                            self.show_auth = Some(AuthMode::Login);
-                        }
-                    }
-                    "denied" => {
-                        ui.heading("Your request was declined");
-                        if ui.button("Start over").clicked() {
-                            let _ = self.engine.clear_access_request();
-                            self.access_request = None;
-                            self.show_pending = false;
-                            self.show_auth = Some(AuthMode::Request);
-                        }
-                    }
-                    _ => {
-                        ui.heading("Awaiting owner approval");
-                        ui.horizontal(|ui| {
-                            if ui.button("Check status").clicked() {
-                                let engine = self.engine.clone();
-                                self.run_async(async move {
-                                    Ok(Message::AccessRequest(Some(
-                                        engine.access_request_status().await?,
-                                    )))
-                                });
-                            }
-                            if ui.button("Sign out this device").clicked() {
-                                self.sign_out_this_device();
-                            }
-                        });
-                    }
-                }
-            });
-        if !open {
-            self.show_pending = false;
-        }
-    }
-
     fn access_modal(&mut self, ctx: &egui::Context) {
         let mut open = true;
-        egui::Window::new("Publishing access")
+        egui::Window::new("Publishing licences")
             .collapsible(false)
             .resizable(true)
             .default_size([720.0, 480.0])
             .open(&mut open)
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.licence_label)
+                            .desired_width(280.0)
+                            .hint_text("Who is this licence for?"),
+                    );
+                    let can_create = !self.busy && !self.licence_label.trim().is_empty();
+                    if ui
+                        .add_enabled(can_create, egui::Button::new("Generate licence"))
+                        .clicked()
+                    {
+                        let engine = self.engine.clone();
+                        let label = self.licence_label.clone();
+                        self.run_async(async move {
+                            let licence = engine.create_licence(&label).await?;
+                            let licences = engine.licences().await?;
+                            Ok(Message::LicenceCreated(licence, licences))
+                        });
+                    }
+                });
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
                     for (filter, label) in [
-                        (AccessFilter::Pending, "Pending"),
+                        (AccessFilter::Available, "Not activated"),
                         (AccessFilter::Active, "Active"),
                         (AccessFilter::Revoked, "Revoked"),
-                        (AccessFilter::Denied, "Declined"),
                     ] {
                         if ui
                             .selectable_label(self.access_filter == filter, label)
@@ -4371,121 +4166,63 @@ impl ClipApp {
                     ui.text_edit_singleline(&mut self.access_query);
                 });
                 let query = self.access_query.to_lowercase();
-                match self.access_filter {
-                    AccessFilter::Pending | AccessFilter::Denied => {
-                        let status = if self.access_filter == AccessFilter::Pending {
-                            "pending"
-                        } else {
-                            "denied"
-                        };
-                        for request in self.admin_requests.clone() {
-                            if request.status != status
-                                || !format!("{} {}", request.username, request.display_name)
-                                    .to_lowercase()
-                                    .contains(&query)
-                            {
-                                continue;
-                            }
-                            ui.horizontal(|ui| {
-                                ui.label(format!(
-                                    "{}  @{}",
-                                    request.display_name, request.username
-                                ));
-                                if request.status == "pending" {
-                                    if ui.button("Approve").clicked() {
-                                        self.review(&request.id, "approved");
-                                    }
-                                    if ui.button("Decline").clicked() {
-                                        self.review(&request.id, "denied");
-                                    }
-                                }
-                            });
+                for licence in self.admin_licences.clone() {
+                    let visible = match self.access_filter {
+                        AccessFilter::Available => {
+                            licence.status == "active" && licence.user_id.is_none()
                         }
+                        AccessFilter::Active => {
+                            licence.status == "active" && licence.user_id.is_some()
+                        }
+                        AccessFilter::Revoked => licence.status == "revoked",
+                    };
+                    let searchable = format!(
+                        "{} {} {}",
+                        licence.label,
+                        licence.display_name.as_deref().unwrap_or(""),
+                        licence.key_hint
+                    )
+                    .to_lowercase();
+                    if !visible || !searchable.contains(&query) {
+                        continue;
                     }
-                    AccessFilter::Active | AccessFilter::Revoked => {
-                        let status = if self.access_filter == AccessFilter::Active {
-                            "active"
-                        } else {
-                            "revoked"
-                        };
-                        for member in self.admin_users.clone() {
-                            if member.status != status
-                                || !format!("{} {}", member.username, member.display_name)
-                                    .to_lowercase()
-                                    .contains(&query)
-                            {
-                                continue;
-                            }
-                            ui.horizontal(|ui| {
-                                ui.label(format!(
-                                    "{}  @{}  ·  {} devices",
-                                    member.display_name, member.username, member.device_count
-                                ));
-                                let current = self.user.as_ref().map(|user| user.id.clone());
-                                if ui
-                                    .add_enabled(
-                                        current.as_deref() != Some(&member.id)
-                                            && member.status == "active",
-                                        egui::Button::new("Reset password"),
-                                    )
-                                    .clicked()
-                                {
-                                    let engine = self.engine.clone();
-                                    let id = member.id.clone();
-                                    self.run_async(async move {
-                                        Ok(Message::PasswordReset(
-                                            engine.create_password_reset(&id).await?,
-                                        ))
-                                    });
-                                }
-                                let next = if member.status == "active" {
-                                    "revoked"
+                    theme::card().show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            let identity =
+                                licence.display_name.as_deref().unwrap_or("Not activated");
+                            ui.label(format!(
+                                "{}  ·  {}  ·  {}  ·  {} devices",
+                                licence.label, identity, licence.key_hint, licence.device_count
+                            ));
+                            let next = if licence.status == "active" {
+                                "revoked"
+                            } else {
+                                "active"
+                            };
+                            if ui
+                                .button(if licence.status == "active" {
+                                    "Revoke"
                                 } else {
-                                    "active"
-                                };
-                                if ui
-                                    .add_enabled(
-                                        current.as_deref() != Some(&member.id),
-                                        egui::Button::new(if member.status == "active" {
-                                            "Revoke"
-                                        } else {
-                                            "Restore"
-                                        }),
-                                    )
-                                    .clicked()
-                                {
-                                    let engine = self.engine.clone();
-                                    let id = member.id.clone();
-                                    let status = next.to_string();
-                                    self.run_async(async move {
-                                        engine.set_user_status(&id, &status).await?;
-                                        Ok(Message::Admin(
-                                            engine.admin_users().await?,
-                                            engine.admin_access_requests().await?,
-                                        ))
-                                    });
-                                }
-                            });
-                        }
-                    }
+                                    "Restore"
+                                })
+                                .clicked()
+                            {
+                                let engine = self.engine.clone();
+                                let id = licence.id.clone();
+                                let status = next.to_string();
+                                self.run_async(async move {
+                                    engine.set_licence_status(&id, &status).await?;
+                                    Ok(Message::Admin(engine.licences().await?))
+                                });
+                            }
+                        });
+                    });
+                    ui.add_space(5.0);
                 }
             });
         if !open {
             self.show_access = false;
         }
-    }
-
-    fn review(&mut self, id: &str, decision: &str) {
-        let engine = self.engine.clone();
-        let id = id.to_string();
-        let decision = decision.to_string();
-        self.run_async(async move {
-            engine.review_access_request(&id, &decision).await?;
-            Ok(Message::Admin(
-                engine.admin_users().await?,
-                engine.admin_access_requests().await?,
-            ))
-        });
     }
 
     fn publish_flow_modal(&mut self, ctx: &egui::Context) {
@@ -5050,24 +4787,24 @@ impl ClipApp {
         }
     }
 
-    fn reset_modal(&mut self, ctx: &egui::Context) {
-        let Some(reset) = self.created_reset.clone() else {
+    fn created_licence_modal(&mut self, ctx: &egui::Context) {
+        let Some(created) = self.created_licence.clone() else {
             return;
         };
         let mut open = true;
-        egui::Window::new(format!("Password reset for @{}", reset.username))
+        egui::Window::new(format!("Licence for {}", created.licence.label))
             .open(&mut open)
             .collapsible(false)
             .show(ctx, |ui| {
-                ui.label(format!("Single use · expires {}", reset.expires_at));
-                ui.text_edit_multiline(&mut reset.url.clone());
-                if ui.button("Copy link").clicked() {
-                    ui.ctx().copy_text(reset.url.clone());
-                    self.set_notice("Private link copied.");
+                ui.label("Copy this key now. For security, it cannot be shown again.");
+                ui.add(egui::TextEdit::singleline(&mut created.key.clone()).desired_width(420.0));
+                if ui.button("Copy licence key").clicked() {
+                    ui.ctx().copy_text(created.key.clone());
+                    self.set_notice("Licence key copied.");
                 }
             });
         if !open {
-            self.created_reset = None;
+            self.created_licence = None;
         }
     }
 }

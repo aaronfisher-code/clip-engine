@@ -22,14 +22,13 @@ Public viewer → clips.dab.dev/c/<slug> → Worker share page
 ```
 
 Public viewing is intentional. Creating uploads, listing the team library, extending
-retention, approving users, and revoking users all require an active device token.
-Anyone can request an account, but only owner approval creates a publishing account.
-No email address or other personal information is collected. The desktop derives a
-high-entropy credential from the password locally, so a member's human password never
-leaves the machine.
+retention, and managing licences all require an active device token. The owner creates
+high-entropy publishing keys and distributes them privately. Members provide only their
+key and the public display name for their clips; no email address, username, or password
+is collected.
 
 The desktop application is Rust + egui + libmpv. It stores its library in a local
-SQLite database and keeps account credentials in the operating-system credential
+SQLite database and keeps its device token in the operating-system credential
 vault. The cloud control plane is a Cloudflare Worker backed by D1 and R2. Parent R2
 credentials never enter the app: the Worker issues one-hour credentials restricted to
 the exact video and thumbnail keys created for one upload.
@@ -46,8 +45,8 @@ the exact video and thumbnail keys created for one upload.
   capture path and encoder support it, plus direct multipart R2 upload.
 - A separately packaged libobs replay helper with capability-driven display,
   audio-track, FPS, and global-hotkey configuration.
-- Local SQLite library plus a shared cloud library for all approved members.
-- Owner approval, password-reset, and member revocation controls.
+- Local SQLite library plus a shared cloud library for all licensed members.
+- Owner licence generation, revocation, and restoration controls.
 - Public Open Graph clip pages with separate video and thumbnail assets.
 - Exact 30-day application expiry plus an R2 lifecycle backstop.
 - Non-destructive import of the old `data/clip-engine.json` library on first launch.
@@ -327,7 +326,7 @@ cd ..
 Set `R2_PARENT_ACCESS_KEY_ID` in `cloud/wrangler.jsonc` to the Access Key ID from that
 same R2 token. `R2_PARENT_SECRET_ACCESS_KEY` and `R2_PARENT_ACCESS_KEY_ID` must therefore
 be the secret/ID pair created together. Keep the bootstrap token in an encrypted
-password manager. It is the `admin` account's initial and recovery password. The
+password manager. It is the owner's initial and recovery licence. The
 expected local-development secret names are also shown in
 [`cloud/.dev.vars.example`](../cloud/.dev.vars.example).
 
@@ -355,43 +354,30 @@ The repository also contains a manually triggered **Cloud deployment** GitHub Ac
 workflow. Add `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` as repository secrets
 before using it.
 
-### 6. Sign in as the owner and approve members
+### 6. Activate the owner and issue licences
 
-Launch a development build or installer, choose **Sign in**, and use `admin` as the
-username and the `BOOTSTRAP_TOKEN` value as the password. On first sign-in this creates
-the owner account; the same login also recovers or migrates an existing owner account.
-Afterward the desktop keeps the owner signed in in the same way as every other user.
+Launch a development build or installer, open **Publishing licence**, enter the
+`BOOTSTRAP_TOKEN`, and choose the display name to use for owner-published clips. On first
+activation this creates the owner identity; the same key also recovers an existing owner.
+Afterward the desktop keeps the owner activated in the same way as every other user.
 
-Normal sign-in needs only the username and password. The resulting random device token
+Successful activation returns a random device token. It
 is stored in Windows Credential Manager or the Linux Secret Service keyring, while D1
-stores only a peppered SHA-256 hash. This keeps the user signed in across restarts and
-application updates. Signing out revokes only that device server-side before removing
+stores only a peppered SHA-256 hash. This keeps the device activated across restarts and
+application updates. Removing the licence revokes only that device server-side before removing
 the local credential.
 
-On a friend's first launch, **Create account** asks only for a username, display name,
-and password. **Request access** places the account in the owner's review queue and
-saves a status token in the operating-system credential vault. The waiting screen tells
-them that the owner will notify them; they can use **Check status** after you do.
+Open **Manage access**, enter a private label identifying the recipient, and choose
+**Generate licence**. Copy the key from the one-time dialog and send it privately. On a
+friend's first publish, the app asks for that key and the display name to show beside
+their clips. There is no registration, approval queue, password, or reset flow.
 
-Open **Manage access → Pending** to filter, approve, or decline requests. Approval
-creates a durable member account. Tell the member they can now sign in; they remain
-signed in until they explicitly sign out or you revoke them. Restoring a revoked
-account does not reactivate old device sessions.
-
-If a member forgets their password, open **Manage access → Active**, choose **Reset
-password**, and send them the generated one-day token or link privately. They choose
-**Sign in → Forgot my password**, enter their username and that token, and can select a
-new password only after the Worker validates both. Redeeming it signs them in and
-revokes their older device sessions.
-
-PBKDF2-HMAC-SHA256 with 600,000 iterations runs asynchronously on the desktop. The
-Worker performs only a peppered SHA-256 verification of that derived credential, keeping
-routine authentication beneath the Workers Free CPU ceiling. Successful account
-requests are capped at five per source IP per day, and waiting clients check status only
-when asked, limiting idle Worker and D1 usage. For a small private group this should fit
-comfortably inside the free control-plane allowances. R2 storage and operation usage
-still depends on how many gigabytes of clips the group publishes during each 30-day
-window.
+Revoking a licence immediately rejects new API calls and revokes every linked device.
+Restoring it does not reactivate those device sessions; the member must enter the same
+key again. If a key has been exposed, leave it revoked and generate a new one instead.
+For a small private group this should fit comfortably inside the free control-plane
+allowances. R2 storage and operation usage still depends on how many gigabytes of clips
+the group publishes during each 30-day window.
 
 ### 7. Publish desktop installers
 
@@ -464,6 +450,6 @@ used for encrypted backups of the repository, signing key, and optional source c
 - Verify all three custom domains and HTTPS before distributing installers.
 - Apply `cloud/lifecycle.json` and confirm it with `wrangler r2 bucket lifecycle list`.
 - Store Worker and GitHub secrets only in their respective secret stores.
-- Test owner sign-in, account approval, password reset, revocation, multipart upload, expiry, and
-  a desktop installer using a staging account first.
+- Test owner activation, licence generation and revocation, multipart upload, expiry, and
+  a desktop installer using a staging licence first.
 - Enable GitHub branch protection and dependency/security update automation.

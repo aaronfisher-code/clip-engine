@@ -10,13 +10,11 @@ use tokio::io::AsyncReadExt;
 
 const KEYRING_SERVICE: &str = "dev.dab.clip-engine";
 const KEYRING_USER: &str = "device-token";
-const KEYRING_REQUEST_USER: &str = "access-request-token";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CloudUser {
     pub id: String,
-    pub username: String,
     pub display_name: String,
     pub role: String,
     pub status: String,
@@ -24,31 +22,32 @@ pub struct CloudUser {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct AdminUser {
+pub struct Licence {
     pub id: String,
-    pub username: String,
-    pub display_name: String,
-    pub role: String,
+    pub key_hint: String,
+    pub label: String,
     pub status: String,
+    pub user_id: Option<String>,
+    pub display_name: Option<String>,
     #[serde(default)]
     pub device_count: i64,
-    pub last_seen_at: Option<String>,
     #[serde(default)]
     pub active_clip_count: i64,
     #[serde(default)]
     pub active_bytes: i64,
     #[serde(default)]
     pub uploaded_bytes: i64,
+    pub created_at: String,
+    pub last_activated_at: Option<String>,
+    pub revoked_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct PasswordReset {
-    pub token: String,
-    pub url: String,
-    pub username: String,
-    pub purpose: String,
-    pub expires_at: String,
+pub struct CreatedLicence {
+    #[serde(flatten)]
+    pub licence: Licence,
+    pub key: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -57,19 +56,6 @@ pub struct DeviceSession {
     pub token: String,
     pub user: CloudUser,
     pub device_id: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AccessRequest {
-    pub id: String,
-    pub username: String,
-    pub display_name: String,
-    pub status: String,
-    pub created_at: String,
-    pub reviewed_at: Option<String>,
-    #[serde(default)]
-    pub request_token: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -166,18 +152,12 @@ impl CloudClient {
             .context("Could not open the operating-system credential vault")
     }
 
-    fn request_entry() -> anyhow::Result<keyring::Entry> {
-        keyring::Entry::new(KEYRING_SERVICE, KEYRING_REQUEST_USER)
-            .context("Could not open the account-request credential vault")
-    }
-
     pub fn token(&self) -> anyhow::Result<Option<String>> {
         match Self::entry()?.get_password() {
             Ok(value) => Ok(Some(value)),
             Err(keyring::Error::NoEntry) => Ok(None),
-            Err(error) => {
-                Err(error).context("Could not read the Clip Engine login from the credential vault")
-            }
+            Err(error) => Err(error)
+                .context("Could not read the Clip Engine licence from the credential vault"),
         }
     }
 
@@ -185,41 +165,16 @@ impl CloudClient {
         self.token().ok().flatten().is_some()
     }
 
-    fn request_token(&self) -> anyhow::Result<Option<String>> {
-        match Self::request_entry()?.get_password() {
-            Ok(value) => Ok(Some(value)),
-            Err(keyring::Error::NoEntry) => Ok(None),
-            Err(error) => Err(error).context("Could not read the pending account request"),
-        }
-    }
-
-    pub fn pending_access_request(&self) -> bool {
-        self.request_token().ok().flatten().is_some()
-    }
-
-    fn store_request_token(&self, token: &str) -> anyhow::Result<()> {
-        Self::request_entry()?
-            .set_password(token)
-            .context("Could not save the pending account request")
-    }
-
-    pub fn clear_access_request(&self) -> anyhow::Result<()> {
-        match Self::request_entry()?.delete_credential() {
-            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-            Err(error) => Err(error).context("Could not remove the pending account request"),
-        }
-    }
-
     fn store_token(&self, token: &str) -> anyhow::Result<()> {
         Self::entry()?
             .set_password(token)
-            .context("Could not save the Clip Engine login to the credential vault")
+            .context("Could not save the Clip Engine licence to the credential vault")
     }
 
     fn clear_token(&self) -> anyhow::Result<()> {
         match Self::entry()?.delete_credential() {
             Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-            Err(error) => Err(error).context("Could not remove the Clip Engine login"),
+            Err(error) => Err(error).context("Could not remove the Clip Engine licence"),
         }
     }
 
@@ -229,8 +184,7 @@ impl CloudClient {
                 .send::<(), serde_json::Value>(Method::POST, "/v1/auth/logout", None, true)
                 .await;
         }
-        self.clear_token()?;
-        self.clear_access_request()
+        self.clear_token()
     }
 
     async fn send<I: Serialize + ?Sized, O: DeserializeOwned>(
@@ -249,7 +203,7 @@ impl CloudClient {
         if authenticated {
             let token = self
                 .token()?
-                .context("Sign in with an invitation before publishing")?;
+                .context("Enter a valid licence key before publishing")?;
             request = request.bearer_auth(token);
         }
         let response = request
@@ -264,7 +218,8 @@ impl CloudClient {
                 .map(|value| value.error)
                 .unwrap_or_else(|_| format!("Cloud request failed ({status})"));
             if status == StatusCode::UNAUTHORIZED {
-                bail!("Your Clip Engine login is no longer valid. Sign in again.");
+                let _ = self.clear_token();
+                bail!("Your publishing licence is no longer valid. Enter a licence key again.");
             }
             bail!(error);
         }
@@ -274,31 +229,25 @@ impl CloudClient {
             .context("The Clip Engine service returned an invalid response")
     }
 
-    pub async fn redeem(
+    pub async fn activate_licence(
         &self,
-        invite_token: &str,
-        username: &str,
-        credential_secret: &str,
+        licence_key: &str,
         display_name: &str,
         device_name: &str,
     ) -> anyhow::Result<DeviceSession> {
         #[derive(Serialize)]
         #[serde(rename_all = "camelCase")]
         struct Input<'a> {
-            invite_token: &'a str,
-            username: &'a str,
-            credential_secret: &'a str,
+            licence_key: &'a str,
             display_name: &'a str,
             device_name: &'a str,
         }
         let session = self
             .send(
                 Method::POST,
-                "/v1/auth/redeem",
+                "/v1/auth/licence",
                 Some(&Input {
-                    invite_token,
-                    username,
-                    credential_secret,
+                    licence_key,
                     display_name,
                     device_name,
                 }),
@@ -308,65 +257,8 @@ impl CloudClient {
         self.store_session(session)
     }
 
-    pub async fn login(
-        &self,
-        username: &str,
-        credential_secret: &str,
-        owner_token: Option<&str>,
-        device_name: &str,
-    ) -> anyhow::Result<DeviceSession> {
-        #[derive(Serialize)]
-        #[serde(rename_all = "camelCase")]
-        struct Input<'a> {
-            username: &'a str,
-            credential_secret: &'a str,
-            owner_token: Option<&'a str>,
-            device_name: &'a str,
-        }
-        let session = self
-            .send(
-                Method::POST,
-                "/v1/auth/login",
-                Some(&Input {
-                    username,
-                    credential_secret,
-                    owner_token,
-                    device_name,
-                }),
-                false,
-            )
-            .await?;
-        self.store_session(session)
-    }
-
-    pub async fn validate_password_reset(
-        &self,
-        invite_token: &str,
-        username: &str,
-    ) -> anyhow::Result<()> {
-        #[derive(Serialize)]
-        #[serde(rename_all = "camelCase")]
-        struct Input<'a> {
-            invite_token: &'a str,
-            username: &'a str,
-        }
-        let _: serde_json::Value = self
-            .send(
-                Method::POST,
-                "/v1/auth/password-reset/validate",
-                Some(&Input {
-                    invite_token,
-                    username,
-                }),
-                false,
-            )
-            .await?;
-        Ok(())
-    }
-
     fn store_session(&self, session: DeviceSession) -> anyhow::Result<DeviceSession> {
         self.store_token(&session.token)?;
-        let _ = self.clear_access_request();
         Ok(session)
     }
 
@@ -374,102 +266,21 @@ impl CloudClient {
         self.send::<(), _>(Method::GET, "/v1/me", None, true).await
     }
 
-    pub async fn request_access(
-        &self,
-        username: &str,
-        display_name: &str,
-        credential_secret: &str,
-    ) -> anyhow::Result<AccessRequest> {
-        #[derive(Serialize)]
-        #[serde(rename_all = "camelCase")]
-        struct Input<'a> {
-            username: &'a str,
-            display_name: &'a str,
-            credential_secret: &'a str,
-        }
-        let mut request: AccessRequest = self
-            .send(
-                Method::POST,
-                "/v1/access-requests",
-                Some(&Input {
-                    username,
-                    display_name,
-                    credential_secret,
-                }),
-                false,
-            )
-            .await?;
-        let token = request
-            .request_token
-            .take()
-            .context("The service did not return an account-request token")?;
-        self.store_request_token(&token)?;
-        Ok(request)
-    }
-
-    pub async fn access_request_status(&self) -> anyhow::Result<AccessRequest> {
-        let token = self
-            .request_token()?
-            .context("No pending account request is saved on this device")?;
-        let response = self
-            .client
-            .get(format!("{}/v1/access-requests/me", self.base_url))
-            .bearer_auth(token)
-            .send()
-            .await
-            .context("Could not reach the Clip Engine service")?;
-        let status = response.status();
-        if !status.is_success() {
-            let error = response
-                .json::<ApiError>()
-                .await
-                .map(|value| value.error)
-                .unwrap_or_else(|_| format!("Account request failed ({status})"));
-            bail!(error);
-        }
-        response
-            .json()
-            .await
-            .context("The Clip Engine service returned an invalid account request")
-    }
-
-    pub async fn access_requests(&self) -> anyhow::Result<Vec<AccessRequest>> {
-        self.send::<(), _>(Method::GET, "/v1/access-requests", None, true)
+    pub async fn licences(&self) -> anyhow::Result<Vec<Licence>> {
+        self.send::<(), _>(Method::GET, "/v1/licences", None, true)
             .await
     }
 
-    pub async fn review_access_request(&self, id: &str, decision: &str) -> anyhow::Result<()> {
+    pub async fn create_licence(&self, label: &str) -> anyhow::Result<CreatedLicence> {
         #[derive(Serialize)]
         struct Input<'a> {
-            decision: &'a str,
+            label: &'a str,
         }
-        let _: serde_json::Value = self
-            .send(
-                Method::PATCH,
-                &format!("/v1/access-requests/{id}"),
-                Some(&Input { decision }),
-                true,
-            )
-            .await?;
-        Ok(())
-    }
-
-    pub async fn create_password_reset(&self, id: &str) -> anyhow::Result<PasswordReset> {
-        self.send(
-            Method::POST,
-            &format!("/v1/users/{id}/password-reset"),
-            Some(&serde_json::json!({})),
-            true,
-        )
-        .await
-    }
-
-    pub async fn users(&self) -> anyhow::Result<Vec<AdminUser>> {
-        self.send::<(), _>(Method::GET, "/v1/users", None, true)
+        self.send(Method::POST, "/v1/licences", Some(&Input { label }), true)
             .await
     }
 
-    pub async fn set_user_status(&self, id: &str, status: &str) -> anyhow::Result<()> {
+    pub async fn set_licence_status(&self, id: &str, status: &str) -> anyhow::Result<()> {
         #[derive(Serialize)]
         struct Input<'a> {
             status: &'a str,
@@ -477,7 +288,7 @@ impl CloudClient {
         let _: serde_json::Value = self
             .send(
                 Method::PATCH,
-                &format!("/v1/users/{id}"),
+                &format!("/v1/licences/{id}"),
                 Some(&Input { status }),
                 true,
             )
