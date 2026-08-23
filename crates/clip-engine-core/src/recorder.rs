@@ -89,6 +89,11 @@ impl RecorderSupervisor {
         Ok((self.capabilities(), self.status()))
     }
 
+    pub fn refresh_status(&self) -> Result<RecorderStatus> {
+        let _ = self.request(RecorderRequest::GetStatus)?;
+        Ok(self.status())
+    }
+
     pub fn apply_config(&self, config: RecorderConfig) -> Result<()> {
         let config = self.capabilities().normalize_config(&config.normalize());
         let applied_config = if config.mode == RecorderMode::Automatic {

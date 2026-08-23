@@ -7,20 +7,24 @@ installing the runtime. Linux requires `linux-capture.so`,
 `linux-pipewire.so`, and `linux-pulseaudio.so`; Windows requires
 `win-capture.dll`, `libobs-winrt.dll`, and `win-wasapi.dll`. Both platforms
 require
-`obs-ffmpeg`, `obs-nvenc`, and `obs-qsv11` for the supported encoder matrix.
+`obs-ffmpeg`, `obs-nvenc`, and `obs-qsv11` for the supported hardware encoder
+matrix, plus `obs-x264` as the software fallback.
 `obs-ffmpeg` also provides the replay-buffer output and audio encoders, as well
 as VAAPI encoders on Linux and AMD AMF encoders on Windows, so there is no
 separate AMD encoder module to bundle. Use
 `scripts/prepare-libobs-runtime.mjs` with a checksum-verified archive before
 creating an installer; the repository intentionally does not commit platform
 runtime binaries.
-The runtime also retains the NVENC and Quick Sync capability-test helpers.
+The Windows runtime also retains the AMD AMF, NVENC, and Quick Sync
+capability-test helpers; Linux retains the NVENC helper.
 Release packages place them beside the recorder executable, while development
 launches stage them there before libobs starts so OBS can perform hardware
 capability detection.
-The Linux preparation step removes the OBS desktop executable because the
-recorder uses libobs directly and does not need the Qt-based OBS frontend. The
-runtime preparation also removes the unused OBS WebSocket and Browser modules.
+Runtime preparation removes the OBS desktop executable, Qt frontend libraries,
+debug symbols, and frontend data on both platforms because the recorder uses
+libobs directly. It keeps only the display/audio capture, replay output, and
+encoder modules that Clip Engine instantiates, removing unused WebSocket,
+streaming, filter, transition, browser, hardware-I/O, and media-source plugins.
 The Browser module starts CEF and relies on frontend callbacks that are not
 available to the recorder; leaving it in the plugin directory can crash a
 Wayland helper during startup. Removing it also prevents CEF support libraries

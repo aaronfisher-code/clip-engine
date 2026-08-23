@@ -430,7 +430,10 @@ mod tests {
             .unwrap();
 
         let migrated = database.recorder_config().unwrap().unwrap();
-        assert_eq!(migrated.schema_version, 2);
+        assert_eq!(
+            migrated.schema_version,
+            clip_engine_recorder_protocol::RECORDER_CONFIG_SCHEMA_VERSION
+        );
         assert_eq!(
             migrated.mode,
             clip_engine_recorder_protocol::RecorderMode::Advanced
@@ -442,7 +445,10 @@ mod tests {
 
         let saved: serde_json::Value =
             serde_json::from_str(&database.setting("recorder_config").unwrap().unwrap()).unwrap();
-        assert_eq!(saved["schemaVersion"], 2);
+        assert_eq!(
+            saved["schemaVersion"],
+            clip_engine_recorder_protocol::RECORDER_CONFIG_SCHEMA_VERSION
+        );
         std::fs::remove_dir_all(directory).unwrap();
     }
 }

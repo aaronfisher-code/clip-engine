@@ -48,8 +48,10 @@ await normalizeRuntimeRoot(source);
 if (!(await isRuntimeRoot(source))) {
   throw new Error("OBS runtime could not be normalized to a supported layout");
 }
-await pruneDesktopExecutable(source);
+await pruneDesktopFrontend(source);
 await pruneRecorderIncompatibleModules(source);
+await pruneUnusedPluginModules(source);
+await pruneDebugSymbols(source);
 await ensureCapturePlugins(source);
 await ensureEncoderPlugins(source);
 await ensureEncoderHelpers(source);
@@ -217,21 +219,34 @@ async function normalizeRuntimeRoot(root) {
   await rm(multiArchLibrary, { recursive: true, force: true });
 }
 
-async function pruneDesktopExecutable(root) {
-  if (process.platform !== "linux") return;
-  await rm(join(root, "bin", "obs"), { force: true });
-  await rm(join(root, "obs"), { force: true });
-  for (const pluginPath of [
-    join(root, "lib", "obs-plugins", "obs-websocket.so"),
-    join(root, "obs-plugins", "obs-websocket.so"),
+async function pruneDesktopFrontend(root) {
+  // Clip Engine embeds libobs and never launches the Qt OBS Studio frontend.
+  // Remove the desktop process and its frontend-only runtime on both targets.
+  for (const path of [
+    join(root, "bin", "obs"),
+    join(root, "obs"),
+    join(root, "bin", "64bit", "obs64.exe"),
+    join(root, "bin", "obs64.exe"),
+    join(root, "obs64.exe"),
+    join(root, "data", "obs-studio"),
+    join(root, "share", "obs", "obs-studio"),
+    join(root, "data", "obs-scripting"),
+    join(root, "share", "obs", "obs-scripting"),
   ]) {
-    await rm(pluginPath, { force: true });
+    await rm(path, { recursive: true, force: true });
   }
-  for (const dataPath of [
-    join(root, "share", "obs", "obs-plugins", "obs-websocket"),
-    join(root, "data", "obs-plugins", "obs-websocket"),
-  ]) {
-    await rm(dataPath, { recursive: true, force: true });
+
+  const frontendFiles = new Set(["obs-frontend-api.dll", "obs-scripting.dll"]);
+  await removeNamedEntries(root, frontendFiles);
+  await removeEntriesMatching(
+    root,
+    (entry) => entry.isFile() && /^Qt6.*\.dll$/i.test(entry.name),
+  );
+
+  for (const directory of [join(root, "bin", "64bit"), join(root, "bin")]) {
+    for (const name of ["iconengines", "imageformats", "platforms", "styles"]) {
+      await rm(join(directory, name), { recursive: true, force: true });
+    }
   }
 }
 
@@ -296,6 +311,72 @@ async function removeNamedEntries(directory, names) {
   }
 }
 
+async function removeEntriesMatching(directory, predicate) {
+  if (!(await isDirectory(directory))) return;
+  for (const entry of await readdir(directory, { withFileTypes: true })) {
+    const path = join(directory, entry.name);
+    if (predicate(entry)) {
+      await rm(path, { recursive: true, force: true });
+    } else if (entry.isDirectory() && !entry.isSymbolicLink()) {
+      await removeEntriesMatching(path, predicate);
+    }
+  }
+}
+
+async function pruneUnusedPluginModules(root) {
+  const retainedModules =
+    process.platform === "win32"
+      ? new Set([
+          "obs-ffmpeg.dll",
+          "obs-nvenc.dll",
+          "obs-qsv11.dll",
+          "obs-x264.dll",
+          "win-capture.dll",
+          "win-wasapi.dll",
+        ])
+      : new Set([
+          "linux-capture.so",
+          "linux-pipewire-audio.so",
+          "linux-pipewire.so",
+          "linux-pulseaudio.so",
+          "obs-ffmpeg.so",
+          "obs-nvenc.so",
+          "obs-qsv11.so",
+          "obs-x264.so",
+        ]);
+  const extension = process.platform === "win32" ? ".dll" : ".so";
+  for (const directory of [
+    join(root, "obs-plugins", "64bit"),
+    join(root, "obs-plugins"),
+    join(root, "lib", "obs-plugins"),
+  ]) {
+    if (!(await isDirectory(directory))) continue;
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
+      if (!entry.name.toLowerCase().endsWith(extension)) continue;
+      if (retainedModules.has(entry.name)) continue;
+      await rm(join(directory, entry.name), { recursive: true, force: true });
+    }
+  }
+
+  const retainedData = new Set(
+    [...retainedModules].map((name) => name.slice(0, -extension.length)),
+  );
+  for (const directory of [
+    join(root, "data", "obs-plugins"),
+    join(root, "share", "obs", "obs-plugins"),
+  ]) {
+    if (!(await isDirectory(directory))) continue;
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
+      if (!entry.isDirectory() || retainedData.has(entry.name)) continue;
+      await rm(join(directory, entry.name), { recursive: true, force: true });
+    }
+  }
+}
+
+async function pruneDebugSymbols(root) {
+  await removeEntriesMatching(root, (entry) => entry.isFile() && entry.name.endsWith(".pdb"));
+}
+
 async function ensureEncoderPlugins(root) {
   const missing = [];
   for (const requirement of requiredEncoderPlugins()) {
@@ -321,7 +402,7 @@ async function ensureEncoderPlugins(root) {
   if (missing.length > 0) {
     throw new Error(
       `OBS runtime is missing required encoder plugins: ${missing.join(", ")}. ` +
-        "The runtime must include FFmpeg, NVENC, and Intel QSV support; " +
+        "The runtime must include FFmpeg, NVENC, Intel QSV, and x264 fallback support; " +
         "AMD AMF on Windows and AMD/Intel VAAPI on Linux are provided by obs-ffmpeg.",
     );
   }
@@ -365,6 +446,7 @@ function requiredEncoderHelpers() {
   }
   if (process.platform === "win32") {
     return [
+      { fileName: "obs-amf-test.exe", purpose: "AMD AMF capability check" },
       { fileName: "obs-nvenc-test.exe", purpose: "NVIDIA NVENC capability check" },
       { fileName: "obs-qsv-test.exe", purpose: "Intel Quick Sync capability check" },
     ];
@@ -413,6 +495,7 @@ function requiredEncoderPlugins() {
       { fileName: "obs-ffmpeg.so", module: "obs-ffmpeg", allowHostFallback: false },
       { fileName: "obs-nvenc.so", module: "obs-nvenc", allowHostFallback: true },
       { fileName: "obs-qsv11.so", module: "obs-qsv11", allowHostFallback: true },
+      { fileName: "obs-x264.so", module: "obs-x264", allowHostFallback: false },
     ];
   }
   if (process.platform === "win32") {
@@ -420,6 +503,7 @@ function requiredEncoderPlugins() {
       { fileName: "obs-ffmpeg.dll", module: "obs-ffmpeg", allowHostFallback: false },
       { fileName: "obs-nvenc.dll", module: "obs-nvenc", allowHostFallback: false },
       { fileName: "obs-qsv11.dll", module: "obs-qsv11", allowHostFallback: false },
+      { fileName: "obs-x264.dll", module: "obs-x264", allowHostFallback: false },
     ];
   }
   return [];

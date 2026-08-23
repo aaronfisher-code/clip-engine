@@ -40,7 +40,7 @@ enum TrayCommand {
 }
 
 pub struct TrayController {
-    menu_ids: MenuIds,
+    action_rx: Receiver<TrayAction>,
     #[cfg(not(target_os = "linux"))]
     _icon: TrayIcon,
     #[cfg(not(target_os = "linux"))]
@@ -52,15 +52,16 @@ pub struct TrayController {
 }
 
 impl TrayController {
-    pub fn new(icons: TrayIcons) -> Result<Self> {
+    pub fn new(icons: TrayIcons, ctx: eframe::egui::Context) -> Result<Self> {
         #[cfg(target_os = "linux")]
         {
-            Self::new_linux(icons)
+            Self::new_linux(icons, ctx)
         }
 
         #[cfg(not(target_os = "linux"))]
         {
             let (menu, menu_ids) = build_menu()?;
+            let action_rx = install_event_handlers(&menu_ids, ctx);
             let tray = TrayIconBuilder::new()
                 .with_menu(Box::new(menu))
                 .with_icon(icons.idle.clone())
@@ -69,7 +70,7 @@ impl TrayController {
                 .build()
                 .context("create system tray icon")?;
             Ok(Self {
-                menu_ids,
+                action_rx,
                 _icon: tray,
                 idle_icon: icons.idle,
                 recording_icon: icons.recording,
@@ -78,7 +79,7 @@ impl TrayController {
     }
 
     #[cfg(target_os = "linux")]
-    fn new_linux(icons: TrayIcons) -> Result<Self> {
+    fn new_linux(icons: TrayIcons, ctx: eframe::egui::Context) -> Result<Self> {
         let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
         let (command_tx, command_rx) = mpsc::channel();
         std::thread::Builder::new()
@@ -119,8 +120,9 @@ impl TrayController {
             .recv_timeout(std::time::Duration::from_secs(5))
             .context("wait for Linux tray initialization")?
             .map_err(anyhow::Error::msg)?;
+        let action_rx = install_event_handlers(&menu_ids, ctx);
         Ok(Self {
-            menu_ids,
+            action_rx,
             command_tx,
         })
     }
@@ -144,44 +146,57 @@ impl TrayController {
 
     pub fn poll(&self) -> Vec<TrayAction> {
         let mut actions = Vec::new();
-
-        while let Ok(event) = TrayIconEvent::receiver().try_recv() {
-            if matches!(
-                event,
-                TrayIconEvent::Click {
-                    button: MouseButton::Left,
-                    button_state: MouseButtonState::Up,
-                    ..
-                } | TrayIconEvent::DoubleClick {
-                    button: MouseButton::Left,
-                    ..
-                }
-            ) {
-                actions.push(TrayAction::Show);
-            }
+        while let Ok(action) = self.action_rx.try_recv() {
+            actions.push(action);
         }
-
-        while let Ok(event) = MenuEvent::receiver().try_recv() {
-            let action = if event.id == self.menu_ids.show {
-                Some(TrayAction::Show)
-            } else if event.id == self.menu_ids.start {
-                Some(TrayAction::StartRecorder)
-            } else if event.id == self.menu_ids.stop {
-                Some(TrayAction::StopRecorder)
-            } else if event.id == self.menu_ids.save {
-                Some(TrayAction::SaveReplay)
-            } else if event.id == self.menu_ids.quit {
-                Some(TrayAction::Quit)
-            } else {
-                None
-            };
-            if let Some(action) = action {
-                actions.push(action);
-            }
-        }
-
         actions
     }
+}
+
+fn install_event_handlers(menu_ids: &MenuIds, ctx: eframe::egui::Context) -> Receiver<TrayAction> {
+    let (action_tx, action_rx) = mpsc::channel();
+
+    let tray_tx = action_tx.clone();
+    let tray_ctx = ctx.clone();
+    TrayIconEvent::set_event_handler(Some(move |event: TrayIconEvent| {
+        if matches!(
+            event,
+            TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } | TrayIconEvent::DoubleClick {
+                button: MouseButton::Left,
+                ..
+            }
+        ) {
+            let _ = tray_tx.send(TrayAction::Show);
+            tray_ctx.request_repaint();
+        }
+    }));
+
+    let menu_ids = menu_ids.clone();
+    MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
+        let action = if event.id == menu_ids.show {
+            Some(TrayAction::Show)
+        } else if event.id == menu_ids.start {
+            Some(TrayAction::StartRecorder)
+        } else if event.id == menu_ids.stop {
+            Some(TrayAction::StopRecorder)
+        } else if event.id == menu_ids.save {
+            Some(TrayAction::SaveReplay)
+        } else if event.id == menu_ids.quit {
+            Some(TrayAction::Quit)
+        } else {
+            None
+        };
+        if let Some(action) = action {
+            let _ = action_tx.send(action);
+            ctx.request_repaint();
+        }
+    }));
+
+    action_rx
 }
 
 #[cfg(target_os = "linux")]

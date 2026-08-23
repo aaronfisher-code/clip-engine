@@ -226,12 +226,15 @@ platform capture modules are missing: Linux requires `linux-capture.so`,
 `linux-pipewire.so`, and `linux-pulseaudio.so`; Windows requires
 `win-capture.dll`, `libobs-winrt.dll`, and `win-wasapi.dll`. For the hardware
 encoder matrix it must
-include `obs-ffmpeg.so`, `obs-nvenc.so`, and `obs-qsv11.so` on Linux, or the
-corresponding `.dll` files on Windows. `obs-ffmpeg` contains the replay-buffer
-output, audio encoders, Linux VAAPI, and Windows AMD AMF support; AMD does not
-have a separate encoder plugin in the current OBS runtime. Linux archives may
-use the standard OBS install layout (`share/obs/` plus `lib/obs-plugins/`) as
-well as the flattened layout. The preparation step supplements a Linux archive
+include `obs-ffmpeg.so`, `obs-nvenc.so`, `obs-qsv11.so`, and `obs-x264.so` on
+Linux, or the corresponding `.dll` files on Windows. `obs-x264` is retained as
+the safe software fallback. `obs-ffmpeg` contains the replay-buffer output,
+audio encoders, Linux VAAPI, and Windows AMD AMF support; AMD does not have a
+separate encoder plugin in the current OBS runtime. Windows archives must also
+include `obs-amf-test.exe`, `obs-nvenc-test.exe`, and `obs-qsv-test.exe` so the
+vendor plugins can complete their out-of-process capability checks. Linux archives
+may use the standard OBS install layout (`share/obs/` plus `lib/obs-plugins/`)
+as well as the flattened layout. The preparation step supplements a Linux archive
 missing `obs-nvenc.so` or `obs-qsv11.so` from the host OBS plugin package when
 available, and fails when any required encoder or capture module is still
 missing. The host still provides the GPU vendor runtime: NVIDIA's driver,
@@ -244,6 +247,11 @@ downloads and verifies version 1.2.1 of the third-party
 plugin and installs those files into the pinned runtime. Without that optional
 plugin, the recorder still provides system and microphone tracks and reports
 why application routes are unavailable.
+
+The preparation script removes the OBS Studio executable, Qt frontend, debug
+symbols, and plugin modules that Clip Engine never instantiates. It retains
+libobs data plus the platform display/audio capture modules, FFmpeg replay
+output, hardware encoders, x264 fallback, and encoder/mux capability helpers.
 
 Do not ship an unverified system runtime in the installer. Include the OBS
 license/source-offer files in `resources/obs` and

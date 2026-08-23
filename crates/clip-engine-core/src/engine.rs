@@ -119,6 +119,10 @@ impl Engine {
         self.recorder.refresh()
     }
 
+    pub fn refresh_recorder_status(&self) -> anyhow::Result<RecorderStatus> {
+        self.recorder.refresh_status()
+    }
+
     pub fn apply_recorder_config(&self, mut config: RecorderConfig) -> anyhow::Result<()> {
         config = config.normalize();
         let capabilities = self.recorder.capabilities();

@@ -71,7 +71,24 @@ enum Message {
         capabilities: RecorderCapabilities,
         status: Box<RecorderStatus>,
     },
+    RecorderStatusRefreshed(Box<RecorderStatus>),
     RecorderImported(Vec<String>),
+}
+
+#[derive(Clone)]
+struct UiSender {
+    tx: Sender<Message>,
+    ctx: egui::Context,
+}
+
+impl UiSender {
+    fn send(&self, message: Message) -> bool {
+        let sent = self.tx.send(message).is_ok();
+        if sent {
+            self.ctx.request_repaint();
+        }
+        sent
+    }
 }
 
 struct EditorState {
@@ -173,7 +190,7 @@ pub struct ClipApp {
     error_until: Option<Instant>,
     busy: bool,
     last_refresh: Instant,
-    tx: Sender<Message>,
+    tx: UiSender,
     rx: Receiver<Message>,
     licence_key: String,
     auth_display: String,
@@ -214,7 +231,11 @@ impl ClipApp {
         startup_error: Option<String>,
     ) -> Self {
         theme::apply(&cc.egui_ctx);
-        let (tx, rx) = mpsc::channel();
+        let (message_tx, rx) = mpsc::channel();
+        let tx = UiSender {
+            tx: message_tx,
+            ctx: cc.egui_ctx.clone(),
+        };
         let config = engine.config().unwrap_or_else(|_| AppConfig {
             source_directory: String::new(),
             authenticated: false,
@@ -244,7 +265,9 @@ impl ClipApp {
         let clips = engine.clips().unwrap_or(clips);
         let recorder_capabilities = engine.recorder_capabilities();
         let recorder_status = engine.recorder_status();
-        let (tray, tray_error) = match crate::tray::load_icons().and_then(TrayController::new) {
+        let (tray, tray_error) = match crate::tray::load_icons()
+            .and_then(|icons| TrayController::new(icons, cc.egui_ctx.clone()))
+        {
             Ok(tray) => (Some(tray), None),
             Err(error) => (None, Some(format!("System tray unavailable: {error:#}"))),
         };
@@ -688,6 +711,9 @@ impl ClipApp {
                     self.recorder_loading = false;
                     self.busy = false;
                 }
+                Message::RecorderStatusRefreshed(status) => {
+                    self.recorder_status = *status;
+                }
                 Message::RecorderImported(ids) => {
                     self.reload_library();
                     self.busy = false;
@@ -823,7 +849,6 @@ impl ClipApp {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.hide_window(ctx, frame);
         }
-        ctx.request_repaint_after(Duration::from_millis(250));
     }
 
     fn show_window(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
@@ -864,7 +889,7 @@ impl eframe::App for ClipApp {
         }
         self.pump();
         self.poll_tray(ctx, frame);
-        self.poll_recorder();
+        self.poll_recorder(ctx);
         self.sync_tray_recording();
         self.expire_toasts(ctx);
         let previewing = self
@@ -890,7 +915,7 @@ impl eframe::App for ClipApp {
             self.last_refresh = Instant::now();
         }
         if processing {
-            ctx.request_repaint();
+            ctx.request_repaint_after(refresh_every.saturating_sub(self.last_refresh.elapsed()));
         }
         if self.recorder_loading {
             ctx.request_repaint_after(Duration::from_millis(80));
@@ -907,7 +932,15 @@ impl eframe::App for ClipApp {
             )
             || self.update_checking
         {
-            ctx.request_repaint();
+            let video_playing = self
+                .player
+                .as_ref()
+                .is_some_and(|player| player.playing() || player.wants_redraw());
+            if video_playing {
+                ctx.request_repaint();
+            } else {
+                ctx.request_repaint_after(Duration::from_millis(80));
+            }
         }
     }
 
@@ -1189,21 +1222,23 @@ impl ClipApp {
         });
     }
 
-    fn poll_recorder(&mut self) {
+    fn poll_recorder(&mut self, ctx: &egui::Context) {
+        let refresh = (self.show_recorder || self.recorder_status.replay_active) && !self.busy;
+        if refresh {
+            let remaining =
+                Duration::from_secs(2).saturating_sub(self.last_recorder_refresh.elapsed());
+            ctx.request_repaint_after(remaining);
+        }
         if self.last_recorder_refresh.elapsed() < Duration::from_secs(2) {
             return;
         }
         self.last_recorder_refresh = Instant::now();
         let engine = self.engine.clone();
         let tx = self.tx.clone();
-        let refresh = (self.show_recorder || self.recorder_status.replay_active) && !self.busy;
         self.engine.spawn(async move {
             if refresh {
-                if let Ok((capabilities, status)) = engine.refresh_recorder() {
-                    let _ = tx.send(Message::RecorderRefreshed {
-                        capabilities,
-                        status: Box::new(status),
-                    });
+                if let Ok(status) = engine.refresh_recorder_status() {
+                    let _ = tx.send(Message::RecorderStatusRefreshed(Box::new(status)));
                 }
             }
             if let Ok(clips) = engine.import_recorder_replays().await {

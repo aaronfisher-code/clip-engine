@@ -69,25 +69,14 @@ struct VideoContextSettings {
 }
 
 fn initial_video_context() -> VideoContextSettings {
-    let displays = DisplayInfo::all().unwrap_or_default();
-    let display = displays
-        .iter()
-        .find(|display| display.is_primary)
-        .or_else(|| displays.first());
-    let width = display.map(|display| display.width).unwrap_or(1_920);
-    let height = display.map(|display| display.height).unwrap_or(1_080);
-    let fps = display
-        .and_then(display_refresh_rate)
-        .unwrap_or_else(|| Rational::new(30, 1));
-    VideoContextSettings { width, height, fps }
-}
-
-fn display_refresh_rate(display: &DisplayInfo) -> Option<Rational> {
-    let refresh = screen_refresh_hz(display)?;
-    (refresh.is_finite() && refresh > 0.0).then(|| {
-        let refresh = refresh.min(240.0);
-        Rational::new((refresh * 1_000.0).round() as u32, 1_000)
-    })
+    // OBS's video thread runs even before an output is active. Keep the helper
+    // inexpensive while it is only serving settings/status requests; applying
+    // a recorder configuration rebuilds this context at the capture dimensions.
+    VideoContextSettings {
+        width: 320,
+        height: 180,
+        fps: Rational::new(1, 1),
+    }
 }
 
 fn create_obs_context(video_context: VideoContextSettings) -> Result<ObsContext> {
@@ -572,7 +561,7 @@ impl ObsBackend {
             if width > 0 && height > 0 {
                 if let Some(effective) = self.status.effective_settings.as_mut() {
                     let diagnostic = format!(
-                        "Windows capture source initialized at {width}x{height}; WGC was requested with SDR output and OBS may fall back to DXGI when WGC is unavailable."
+                        "Windows capture source initialized at {width}x{height}; OBS automatically selected the DXGI or Windows Graphics Capture path with SDR output."
                     );
                     if !effective.diagnostics.iter().any(|item| item == &diagnostic) {
                         effective.diagnostics.push(diagnostic);
@@ -717,11 +706,10 @@ impl ObsBackend {
                     windows_monitor_device_id(screen_id).unwrap_or_else(|| screen_id.to_owned());
                 settings.set_string("monitor_id", monitor_id.as_str())?;
                 settings.set_bool("capture_cursor", true)?;
-                // OBS's automatic choice commonly selects DXGI for a physical
-                // monitor and WGC for an RDP monitor. Prefer WGC here because
-                // it handles local HDR, hybrid-GPU, and high-refresh displays
-                // more reliably. OBS falls back to DXGI when WGC is unavailable.
-                settings.set_int("method", 2)?;
+                // Match OBS Studio's default and let win-capture select the best
+                // backend for the current display. Forcing WGC adds avoidable
+                // overhead on systems where DXGI desktop duplication is usable.
+                settings.set_int("method", 0)?;
                 settings.set_bool("force_sdr", true)?;
                 ("monitor_capture", settings)
             }
@@ -1871,7 +1859,7 @@ fn prepare_obs_muxer() -> Result<()> {
 
 fn prepare_obs_encoder_helpers(executable_directory: &Path) -> Result<()> {
     let helper_names = if cfg!(windows) {
-        vec!["obs-nvenc-test.exe", "obs-qsv-test.exe"]
+        vec!["obs-amf-test.exe", "obs-nvenc-test.exe", "obs-qsv-test.exe"]
     } else if cfg!(target_os = "linux") {
         vec!["obs-nvenc-test"]
     } else {
@@ -1992,7 +1980,9 @@ impl RecorderBackend for ObsBackend {
 
     fn start(&mut self) -> Result<()> {
         if self.output.is_none() {
-            anyhow::bail!("recorder is not configured");
+            let config = self.config.clone().context("recorder is not configured")?;
+            self.rebuild_graph(&config)
+                .context("restore recorder capture graph")?;
         }
         self.status.state = RecorderState::Starting;
         let result = self.output.as_ref().expect("output checked above").start();
@@ -2018,6 +2008,8 @@ impl RecorderBackend for ObsBackend {
 
     fn stop(&mut self) -> Result<()> {
         self.stop_if_active()?;
+        self.restart_context(initial_video_context())
+            .context("park recorder video context")?;
         self.status.state = RecorderState::Stopped;
         Ok(())
     }
@@ -2527,7 +2519,25 @@ fn encoder_display_label(id: &str) -> String {
     id.into()
 }
 
-fn encoder_preference_score(encoder: &EncoderCapability) -> (u8, u8, String) {
+fn encoder_texture_path_score(encoder: &EncoderCapability) -> u8 {
+    if !encoder.hardware {
+        return 0;
+    }
+
+    let id = encoder.id.to_ascii_lowercase();
+    if id.contains("_soft") || id.contains("_cuda") {
+        return 2;
+    }
+    if id.contains("_tex")
+        || id.contains("texture_")
+        || (id.starts_with("obs_qsv11") && !id.contains("_soft"))
+    {
+        return 0;
+    }
+    1
+}
+
+fn encoder_preference_score(encoder: &EncoderCapability) -> (u8, u8, u8, String) {
     let codec_score = if encoder.hardware {
         match encoder.codec.as_str() {
             "av1" => 0,
@@ -2546,7 +2556,12 @@ fn encoder_preference_score(encoder: &EncoderCapability) -> (u8, u8, String) {
         }
     };
     let hardware_score = if encoder.hardware { 0 } else { 1 };
-    (hardware_score, codec_score, encoder.id.clone())
+    (
+        hardware_score,
+        encoder_texture_path_score(encoder),
+        codec_score,
+        encoder.id.clone(),
+    )
 }
 
 #[cfg(target_os = "linux")]
@@ -3531,7 +3546,7 @@ mod tests {
     #[test]
     fn automatic_encoder_preference_prioritizes_hardware_codec_order() {
         let hardware_av1 = EncoderCapability {
-            id: "obs_nvenc_av1".into(),
+            id: "obs_nvenc_av1_tex".into(),
             label: "hardware AV1".into(),
             hardware: true,
             codec: "av1".into(),
@@ -3539,7 +3554,7 @@ mod tests {
             settings: Vec::new(),
         };
         let hardware_hevc = EncoderCapability {
-            id: "obs_nvenc_hevc".into(),
+            id: "obs_nvenc_hevc_tex".into(),
             label: "hardware HEVC".into(),
             hardware: true,
             codec: "hevc".into(),
@@ -3547,7 +3562,7 @@ mod tests {
             settings: Vec::new(),
         };
         let hardware_h264 = EncoderCapability {
-            id: "obs_nvenc_h264".into(),
+            id: "obs_nvenc_h264_tex".into(),
             label: "hardware H.264".into(),
             hardware: true,
             codec: "h264".into(),
@@ -3579,6 +3594,27 @@ mod tests {
             settings: Vec::new(),
         };
         assert!(encoder_preference_score(&software_h264) < encoder_preference_score(&software_av1));
+    }
+
+    #[test]
+    fn automatic_encoder_prefers_shared_texture_input_over_a_newer_codec() {
+        let copied_av1 = EncoderCapability {
+            id: "obs_nvenc_av1_soft".into(),
+            label: "copied AV1".into(),
+            hardware: true,
+            codec: "av1".into(),
+            family: "AV1".into(),
+            settings: Vec::new(),
+        };
+        let texture_h264 = EncoderCapability {
+            id: "obs_nvenc_h264_tex".into(),
+            label: "texture H.264".into(),
+            hardware: true,
+            codec: "h264".into(),
+            family: "H.264".into(),
+            settings: Vec::new(),
+        };
+        assert!(encoder_preference_score(&texture_h264) < encoder_preference_score(&copied_av1));
     }
 
     #[test]

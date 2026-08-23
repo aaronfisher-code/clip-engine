@@ -8,7 +8,7 @@ use std::{
 };
 
 pub const PROTOCOL_VERSION: u16 = 4;
-pub const RECORDER_CONFIG_SCHEMA_VERSION: u16 = 2;
+pub const RECORDER_CONFIG_SCHEMA_VERSION: u16 = 3;
 pub const DEFAULT_SOCKET_NAME: &str = "clip-engine-recorder";
 pub const MAX_FRAME_BYTES: u32 = 8 * 1024 * 1024;
 pub const IPC_TIMEOUT: Duration = Duration::from_secs(90);
@@ -48,7 +48,7 @@ impl Rational {
 
 impl Default for Rational {
     fn default() -> Self {
-        Self::new(120, 1)
+        Self::new(60, 1)
     }
 }
 
@@ -210,8 +210,8 @@ impl RateControl {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "camelCase")]
 pub enum Multipass {
-    Disabled,
     #[default]
+    Disabled,
     QuarterResolution,
     FullResolution,
 }
@@ -393,7 +393,7 @@ fn default_keyframe_interval() -> u32 {
 }
 
 fn default_preset() -> String {
-    "p5".into()
+    "p4".into()
 }
 
 fn default_tuning() -> String {
@@ -437,7 +437,7 @@ impl Default for RecorderConfig {
             output_width: default_width(),
             output_height: default_height(),
             match_display: true,
-            match_display_fps: true,
+            match_display_fps: false,
             fps: Rational::default(),
             replay_seconds: default_replay_seconds(),
             video_encoder: default_auto(),
@@ -472,13 +472,24 @@ impl Default for RecorderConfig {
 
 impl RecorderConfig {
     pub fn migrate(mut self) -> Self {
-        if self.schema_version < RECORDER_CONFIG_SCHEMA_VERSION {
-            self.schema_version = RECORDER_CONFIG_SCHEMA_VERSION;
+        if self.schema_version < 2 {
             self.mode = RecorderMode::Advanced;
             self.match_display = false;
             self.match_display_fps = false;
             self.rate_control = RateControl::Cbr;
             self.max_bitrate_kbps = 0;
+        }
+        if self.schema_version < 3 && self.mode == RecorderMode::Automatic && self.match_display_fps
+        {
+            // Earlier automatic defaults silently recorded at the full display
+            // refresh rate (often 120-240 Hz). Move those installations to the
+            // gaming-friendly 60 fps default; native-rate capture remains
+            // available by turning the setting back on or using Advanced mode.
+            self.match_display_fps = false;
+            self.fps = Rational::new(60, 1);
+        }
+        if self.schema_version <= RECORDER_CONFIG_SCHEMA_VERSION {
+            self.schema_version = RECORDER_CONFIG_SCHEMA_VERSION;
         }
         self
     }
@@ -1554,7 +1565,11 @@ mod tests {
         let config = RecorderConfig::default();
         assert_eq!(config.schema_version, RECORDER_CONFIG_SCHEMA_VERSION);
         assert_eq!(config.mode, RecorderMode::Automatic);
+        assert!(!config.match_display_fps);
+        assert_eq!(config.fps, Rational::new(60, 1));
         assert_eq!(config.rate_control, RateControl::Cqp);
+        assert_eq!(config.preset, "p4");
+        assert_eq!(config.multipass, Multipass::Disabled);
         assert_eq!(config.container_format, "mkv");
         assert!(config.adaptive_quantization);
         assert!(!config.lookahead);
@@ -1655,6 +1670,35 @@ mod tests {
         assert_eq!(config.video_bitrate_kbps, 24_000);
         assert!(!config.match_display);
         assert!(!config.match_display_fps);
+    }
+
+    #[test]
+    fn previous_automatic_default_migrates_to_sixty_fps() {
+        let config = RecorderConfig {
+            schema_version: 2,
+            mode: RecorderMode::Automatic,
+            match_display_fps: true,
+            fps: Rational::new(120, 1),
+            ..RecorderConfig::default()
+        }
+        .migrate();
+
+        assert_eq!(config.schema_version, RECORDER_CONFIG_SCHEMA_VERSION);
+        assert!(!config.match_display_fps);
+        assert_eq!(config.fps, Rational::new(60, 1));
+    }
+
+    #[test]
+    fn future_config_schema_is_not_downgraded() {
+        let future = RECORDER_CONFIG_SCHEMA_VERSION + 1;
+        let config = RecorderConfig {
+            schema_version: future,
+            ..RecorderConfig::default()
+        }
+        .migrate();
+
+        assert_eq!(config.schema_version, future);
+        assert!(config.validate().is_err());
     }
 
     #[test]
