@@ -172,7 +172,6 @@ pub struct ClipApp {
     user: Option<CloudUser>,
     show_auth: bool,
     show_access: bool,
-    account_open: bool,
     admin_licences: Vec<Licence>,
     access_filter: AccessFilter,
     access_query: String,
@@ -295,7 +294,6 @@ impl ClipApp {
                     user: None,
                     show_auth: false,
                     show_access: false,
-                    account_open: false,
                     admin_licences: Vec::new(),
                     access_filter: AccessFilter::Available,
                     access_query: String::new(),
@@ -368,7 +366,6 @@ impl ClipApp {
             user: None,
             show_auth: false,
             show_access: false,
-            account_open: false,
             admin_licences: Vec::new(),
             access_filter: AccessFilter::Available,
             access_query: String::new(),
@@ -979,19 +976,21 @@ impl eframe::App for ClipApp {
                         );
                     });
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        let label = if self.config.authenticated {
-                            self.user
-                                .as_ref()
-                                .map(|user| user.display_name.clone())
-                                .unwrap_or_else(|| "Connected".into())
+                        let update_label = if self.available_update.is_some() {
+                            "Update available"
+                        } else if self.update_checking {
+                            "Checking…"
                         } else {
-                            "Publishing licence".into()
+                            "Check for updates"
                         };
-                        if ui.button(label).clicked() {
-                            if self.config.authenticated {
-                                self.account_open = !self.account_open;
+                        if ui
+                            .add_enabled(!self.update_checking, egui::Button::new(update_label))
+                            .clicked()
+                        {
+                            if self.available_update.is_some() {
+                                self.update_modal = Some(UpdateModal::Prompt);
                             } else {
-                                self.show_auth = true;
+                                self.schedule_update_check(true);
                             }
                         }
                         if self.user.as_ref().is_some_and(|user| user.role == "owner")
@@ -1016,34 +1015,6 @@ impl eframe::App for ClipApp {
                         }
                     });
                 });
-                if self.account_open {
-                    if let Some(user) = self.user.clone() {
-                        ui.add_space(6.0);
-                        ui.horizontal(|ui| {
-                            ui.label(RichText::new(&user.role).color(theme::MUTED));
-                            if ui.button("Remove licence from this device").clicked() {
-                                self.sign_out_this_device();
-                            }
-                            let update_label = if self.available_update.is_some() {
-                                "Update available"
-                            } else if self.update_checking {
-                                "Checking…"
-                            } else {
-                                "Check for updates"
-                            };
-                            if ui
-                                .add_enabled(!self.update_checking, egui::Button::new(update_label))
-                                .clicked()
-                            {
-                                if self.available_update.is_some() {
-                                    self.update_modal = Some(UpdateModal::Prompt);
-                                } else {
-                                    self.schedule_update_check(true);
-                                }
-                            }
-                        });
-                    }
-                }
             });
 
         if self.library_open {
@@ -4143,16 +4114,6 @@ impl ClipApp {
                     .await?
                     .user,
             ))
-        });
-    }
-
-    fn sign_out_this_device(&mut self) {
-        let engine = self.engine.clone();
-        self.account_open = false;
-        self.show_auth = false;
-        self.run_async(async move {
-            engine.logout().await?;
-            Ok(Message::LoggedOut)
         });
     }
 
