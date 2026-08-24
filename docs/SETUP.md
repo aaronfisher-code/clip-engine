@@ -113,10 +113,21 @@ full capture smoke testing still requires a real graphical session.
 The Recorder panel has two encoding modes:
 
 - **Automatic** selects the best available hardware encoder in AV1, HEVC,
-  H.264, then software order. It uses the selected display's native size and
-  refresh rate (capped at 240 fps), prefers quality-based rate control, and
-  falls back to CBR/bitrate when the encoder does not expose a quality
-  property.
+  H.264, then software order, preferring shared-texture inputs. The selected
+  output resolution is preserved, including native 1440p and 4K. Hardware
+  frame rate is capped at 60 fps and software fallback at 30 fps; Advanced mode
+  is required only for higher frame rates or explicit encoder tuning.
+
+  Encoder settings follow OBS 32's Simple **High Quality, Medium File Size**
+  recording policy: quality starts at 23 with OBS's small-canvas adjustment;
+  NVENC and AMF use CQP, QSV H.264 prefers ICQ and otherwise uses CQP,
+  VideoToolbox uses its quality scale, and x264 uses CRF with the `veryfast`
+  preset. If the preferred quality mode is unavailable, Automatic tries the
+  other quality modes advertised by the encoder and finally uses a bounded CBR
+  fallback. Unrelated controls normally retain the encoder plugin's native
+  defaults. Resolution-sensitive exceptions follow OBS's encoder guidance:
+  high-resolution AMD AV1 uses the Balanced preset with zero B-frames, and a
+  large software workload uses x264's `ultrafast` low-CPU mode.
 - **Advanced** exposes only the properties reported by the selected libobs
   encoder. This includes quality/CQP or CQVBR, target and maximum bitrate,
   keyframe interval, preset, tuning, multipass, profile, look-ahead,
@@ -134,12 +145,14 @@ requires the corresponding vendor driver and hardware support.
 
 ### Recorder platform requirements
 
-- Windows uses OBS monitor capture, WASAPI system/microphone capture, and the
-  WASAPI process-loopback source. Application routes are discovered from
-  visible windows and use an encoded selector that prefers the executable, so
-  changing Spotify/Discord window titles does not break the route. The system
-  route remains the normal WASAPI output mix, so application tracks can overlap
-  it.
+- Windows prefers Windows Graphics Capture and automatically retries with DXGI
+  desktop duplication if WGC does not initialize. Both capture the composed
+  desktop without injecting hooks into the game. Windows also uses WASAPI
+  system/microphone capture and the WASAPI process-loopback source.
+  Application routes are discovered from visible windows and use an encoded
+  selector that prefers the executable, so changing Spotify/Discord window
+  titles does not break the route. The system route remains the normal WASAPI
+  output mix, so application tracks can overlap it.
 - Windows also enumerates active Core Audio `eRender` endpoints and exposes
   optional **Playback-device tracks**. Each route stores the opaque
   `IMMDevice::GetId()` value rather than a friendly name and passes that exact

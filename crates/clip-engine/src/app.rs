@@ -1414,6 +1414,24 @@ impl ClipApp {
                             }
                         });
                     });
+                    if self.recorder_status.replay_active
+                        && (self.recorder_status.rendered_frames > 0
+                            || self.recorder_status.encoded_frames > 0)
+                    {
+                        let has_drops = self.recorder_status.render_lagged_frames > 0
+                            || self.recorder_status.encoder_skipped_frames > 0;
+                        ui.label(
+                            RichText::new(format!(
+                                "Frame health: {} rendered · {} late · {} encoded · {} encoder-skipped",
+                                self.recorder_status.rendered_frames,
+                                self.recorder_status.render_lagged_frames,
+                                self.recorder_status.encoded_frames,
+                                self.recorder_status.encoder_skipped_frames,
+                            ))
+                            .color(if has_drops { theme::DANGER } else { theme::OK })
+                            .size(12.0),
+                        );
+                    }
                     if let Some(error) = &self.recorder_status.last_error {
                         ui.label(RichText::new(error).color(theme::DANGER).size(12.0));
                     }
@@ -1610,6 +1628,15 @@ impl ClipApp {
                         );
                     });
                     self.recorder_config.fps = rational_from_decimal(fps);
+                    if self.recorder_config.mode == RecorderMode::Automatic {
+                        ui.label(
+                            RichText::new(
+                                "Automatic preserves the selected resolution and tunes the encoder for that workload. Frame rate is capped at 60 fps for hardware encoders and 30 fps for software fallback; use Advanced for higher rates.",
+                            )
+                            .color(theme::MUTED)
+                            .size(11.0),
+                        );
+                    }
                     ui.horizontal(|ui| {
                         ui.label("Replay history");
                         ui.add(

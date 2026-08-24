@@ -71,17 +71,24 @@ frame rate (including 120–240 fps when the capture path supports it), set the
 replay length, and bind a global save hotkey. Saving a clip shows a desktop
 notification with a short system sound so you can confirm the buffer worked
 while a game is focused; failures (including pressing the key when the buffer
-is not running) notify the same way. **Automatic** mode chooses a
-hardware AV1, HEVC, or H.264 encoder in that order, uses display-native
-resolution and refresh rate up to 240 fps, and applies replay-safe quality
-defaults. **Advanced** mode exposes the controls reported by the active
-encoder — rate control, quality/bitrate, keyframes, preset, tuning, multipass,
-profile, look-ahead, adaptive quantization, B-frames, GPU, rescaling, and
-custom options — without sending unsupported properties. MKV remains the safe
-default because it survives interruptions and preserves separate tracks; MP4
-is available for workflows that require it. The libobs helper is a separate
-process and is started lazily, so the editor does not carry OBS's runtime during
-ordinary library work.
+is not running) notify the same way. **Automatic** mode chooses a shared-texture
+hardware AV1, HEVC, or H.264 encoder in that order, with software H.264 as the
+safe fallback. It follows OBS 32's Simple recording policy for NVENC, AMF, QSV,
+VideoToolbox, and x264, and leaves unrelated controls at each encoder plugin's
+native defaults. Automatic preserves the selected resolution—including native
+1440p and 4K—and adapts family-specific settings to its pixel workload. Hardware
+frame rate is capped at 60 fps; software fallback is capped at 30 fps and moves
+to x264's low-CPU preset for large canvases. **Advanced** remains available for
+high-refresh capture or explicit encoder tuning. On Windows, capture prefers
+Windows Graphics Capture for stable Alt+Tab transitions and falls back to DXGI
+desktop duplication if WGC cannot initialize; neither path injects into the
+captured game. The Recorder panel reports cumulative late-render and
+encoder-skip counters so performance problems are visible. Advanced exposes
+only controls reported by the active encoder. MKV remains the safe default
+because it survives interruptions and preserves separate tracks; MP4 is
+available for workflows that require it. The libobs helper is a separate
+process and is started lazily, so the editor does not carry OBS's runtime
+during ordinary library work.
 
 **System tray capture.** Clip Engine can stay resident in the Windows notification area or Linux
 system tray. Closing the editor hides it instead of stopping the replay buffer; the tray menu can

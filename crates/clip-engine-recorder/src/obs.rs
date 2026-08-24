@@ -49,6 +49,10 @@ use windows::{
     },
 };
 
+const WINDOWS_CAPTURE_METHOD_WGC: i64 = 2;
+#[cfg(windows)]
+const WINDOWS_CAPTURE_METHOD_DXGI: i64 = 1;
+
 pub struct ObsBackend {
     context: Option<ObsContext>,
     capabilities: RecorderCapabilities,
@@ -343,8 +347,14 @@ impl ObsBackend {
             .video_encoders
             .iter()
             .find(|encoder| encoder.id == video_encoder_id);
-        let applied_video =
-            apply_video_encoder_settings(&mut video_settings, &config, video_capability)?;
+        let applied_video = apply_video_encoder_settings(
+            &mut video_settings,
+            &config,
+            video_capability,
+            resolved.output_width,
+            resolved.output_height,
+            resolved.fps,
+        )?;
         let video_encoder = ObsVideoEncoder::new_from_info(
             ObjectInfo::new(
                 video_encoder_id.clone(),
@@ -453,7 +463,7 @@ impl ObsBackend {
         } else {
             config.output_height
         };
-        let fps = if config.match_display_fps {
+        let mut fps = if config.match_display_fps {
             screen
                 .and_then(|screen| screen.refresh_hz)
                 .filter(|refresh| refresh.is_finite() && *refresh > 0.0)
@@ -488,6 +498,26 @@ impl ObsBackend {
                 "The selected display refresh rate was not reported; using the configured frame rate."
                     .into(),
             );
+        }
+        if config.mode == RecorderMode::Automatic {
+            let hardware = self
+                .capabilities
+                .video_encoders
+                .iter()
+                .find(|encoder| encoder.id == video_encoder_id)
+                .is_none_or(|encoder| encoder.hardware);
+            let requested_fps = fps;
+            fps = automatic_frame_rate(fps, hardware);
+            if requested_fps != fps {
+                diagnostics.push(format!(
+                    "Automatic preserved the requested {}x{} resolution and capped {:.3} fps to {:.3} fps for the {} encoder path.",
+                    output_width,
+                    output_height,
+                    requested_fps.as_f64(),
+                    fps.as_f64(),
+                    if hardware { "hardware" } else { "software" },
+                ));
+            }
         }
         Ok(ResolvedCaptureSettings {
             screen_id,
@@ -546,10 +576,11 @@ impl ObsBackend {
         let source = self
             .sources
             .first()
-            .context("display capture source is missing")?;
+            .context("display capture source is missing")?
+            .clone();
         let source_ptr = source.as_ptr();
         let runtime = source.runtime().clone();
-        let deadline = Instant::now() + Duration::from_secs(8);
+        let deadline = Instant::now() + Duration::from_secs(6);
         while Instant::now() < deadline {
             let source_ptr = source_ptr.clone();
             let (width, height) = runtime.run_with_obs_result(move || unsafe {
@@ -561,7 +592,7 @@ impl ObsBackend {
             if width > 0 && height > 0 {
                 if let Some(effective) = self.status.effective_settings.as_mut() {
                     let diagnostic = format!(
-                        "Windows capture source initialized at {width}x{height}; OBS automatically selected the DXGI or Windows Graphics Capture path with SDR output."
+                        "WGC-preferred Windows capture initialized at {width}x{height} with SDR output."
                     );
                     if !effective.diagnostics.iter().any(|item| item == &diagnostic) {
                         effective.diagnostics.push(diagnostic);
@@ -571,8 +602,40 @@ impl ObsBackend {
             }
             thread::sleep(Duration::from_millis(50));
         }
+
+        // WGC is the more resilient option across fullscreen transitions, but it
+        // is not available in every Windows session. Keep a non-injecting desktop
+        // duplication fallback rather than leaving the recorder unusable.
+        let mut fallback_settings = self
+            .context()
+            .data()
+            .context("create DXGI fallback settings")?;
+        fallback_settings.set_int("method", WINDOWS_CAPTURE_METHOD_DXGI)?;
+        source
+            .update_settings(fallback_settings)
+            .context("switch Windows capture source to DXGI fallback")?;
+
+        let deadline = Instant::now() + Duration::from_secs(4);
+        while Instant::now() < deadline {
+            let source_ptr = source_ptr.clone();
+            let (width, height) = runtime.run_with_obs_result(move || unsafe {
+                (
+                    sys::obs_source_get_width(source_ptr.get_ptr()),
+                    sys::obs_source_get_height(source_ptr.get_ptr()),
+                )
+            })?;
+            if width > 0 && height > 0 {
+                if let Some(effective) = self.status.effective_settings.as_mut() {
+                    effective.diagnostics.push(format!(
+                        "Windows Graphics Capture was unavailable; DXGI desktop duplication initialized at {width}x{height}."
+                    ));
+                }
+                return Ok(());
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
         anyhow::bail!(
-            "Windows display capture stayed at 0x0. Refresh the display list and verify that libobs-winrt.dll is bundled."
+            "Windows display capture stayed at 0x0 with both Windows Graphics Capture and DXGI. Refresh the display list and verify that libobs-winrt.dll is bundled."
         )
     }
 
@@ -706,10 +769,11 @@ impl ObsBackend {
                     windows_monitor_device_id(screen_id).unwrap_or_else(|| screen_id.to_owned());
                 settings.set_string("monitor_id", monitor_id.as_str())?;
                 settings.set_bool("capture_cursor", true)?;
-                // Match OBS Studio's default and let win-capture select the best
-                // backend for the current display. Forcing WGC adds avoidable
-                // overhead on systems where DXGI desktop duplication is usable.
-                settings.set_int("method", 0)?;
+                // Prefer the OS-maintained, non-injecting Windows Graphics Capture
+                // path. It remains stable across the desktop/fullscreen transitions
+                // that invalidate DXGI duplication during Alt+Tab. Clip Engine falls
+                // back to DXGI if WGC cannot initialize.
+                settings.set_int("method", WINDOWS_CAPTURE_METHOD_WGC)?;
                 settings.set_bool("force_sdr", true)?;
                 ("monitor_capture", settings)
             }
@@ -1060,6 +1124,18 @@ struct ResolvedCaptureSettings {
     diagnostics: Vec<String>,
 }
 
+fn automatic_frame_rate(fps: Rational, hardware: bool) -> Rational {
+    // Preserve the resolution the user selected. Automatic bounds frame rate,
+    // then adapts encoder settings to the remaining pixel workload.
+    let max_fps = if hardware { 60.0 } else { 30.0 };
+    let fps = if fps.as_f64() > max_fps {
+        Rational::new(max_fps as u32, 1)
+    } else {
+        fps
+    };
+    fps
+}
+
 #[cfg(windows)]
 fn screen_capability_id(display: &DisplayInfo) -> String {
     if display.name.is_empty() {
@@ -1250,11 +1326,405 @@ struct AppliedVideoSettings {
     diagnostics: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AutomaticEncoderFamily {
+    Nvidia,
+    Amd,
+    Intel,
+    Apple,
+    X264,
+    Other,
+}
+
+struct AutomaticVideoPolicy {
+    family_label: &'static str,
+    rate_control: Option<&'static str>,
+    quality_keys: &'static [&'static str],
+    quality_level: Option<u32>,
+    video_bitrate_kbps: Option<u32>,
+    preset: Option<&'static str>,
+    profile: Option<&'static str>,
+    b_frames: Option<u8>,
+    use_bufsize: bool,
+}
+
+fn automatic_encoder_family(capability: &EncoderCapability) -> AutomaticEncoderFamily {
+    let id = capability.id.to_ascii_lowercase();
+    if id.contains("nvenc") {
+        AutomaticEncoderFamily::Nvidia
+    } else if id.contains("amf") {
+        AutomaticEncoderFamily::Amd
+    } else if id.contains("qsv") {
+        AutomaticEncoderFamily::Intel
+    } else if id.contains("videotoolbox") || id.contains("apple") {
+        AutomaticEncoderFamily::Apple
+    } else if id.contains("x264") {
+        AutomaticEncoderFamily::X264
+    } else {
+        AutomaticEncoderFamily::Other
+    }
+}
+
+fn obs_simple_recording_quality(width: u32, height: u32) -> u32 {
+    // OBS SimpleOutput::CalcCRF starts the "High Quality, Medium File Size"
+    // recording tier at 23 and improves quality for small output canvases.
+    const CROSS_DISTANCE_CUTOFF: f64 = 2_000.0;
+    let cross_distance = f64::from(width).hypot(f64::from(height));
+    let resolution_fraction = cross_distance.min(CROSS_DISTANCE_CUTOFF) / CROSS_DISTANCE_CUTOFF;
+    let reduction = ((1.0 - resolution_fraction) * 10.0) as u32;
+    23_u32.saturating_sub(reduction)
+}
+
+fn encoder_setting_capability<'a>(
+    capability: &'a EncoderCapability,
+    keys: &[&str],
+) -> Option<&'a EncoderSettingCapability> {
+    keys.iter().find_map(|key| {
+        capability
+            .settings
+            .iter()
+            .find(|setting| setting.key == *key)
+    })
+}
+
+fn normalized_encoder_option(value: &str) -> String {
+    value.to_ascii_lowercase().replace([' ', '_', '-', '/'], "")
+}
+
+fn native_rate_control_matches(value: &str, requested: &str) -> bool {
+    let value = normalized_encoder_option(value);
+    match requested {
+        "CQP" => value == "cqp" || value.contains("constantqp"),
+        "ICQ" => value == "icq" || value.contains("intelligentconstantquality"),
+        "CRF" => value == "crf" || value.contains("constantratefactor"),
+        "CQVBR" => value == "cqvbr" || value.contains("qualityvbr"),
+        "CBR" => value == "cbr" || value.contains("constantbitrate"),
+        _ => value == normalized_encoder_option(requested),
+    }
+}
+
+fn automatic_quality_mode_supported(
+    capability: &EncoderCapability,
+    rate_control: &str,
+    quality_keys: &[&str],
+) -> bool {
+    if capability.settings.is_empty() {
+        return true;
+    }
+    let Some(rate_setting) = encoder_setting_capability(capability, &["rate_control", "rc"]) else {
+        return false;
+    };
+    let rate_supported = rate_setting.kind != EncoderSettingKind::List
+        || (rate_setting.options.is_empty() && rate_setting.option_values.is_empty())
+        || rate_setting
+            .options
+            .iter()
+            .chain(rate_setting.option_values.iter())
+            .any(|option| native_rate_control_matches(option, rate_control));
+    rate_supported && encoder_setting_capability(capability, quality_keys).is_some()
+}
+
+fn select_automatic_quality_mode(
+    capability: &EncoderCapability,
+    preferred_rate_control: &'static str,
+    preferred_quality_keys: &'static [&'static str],
+) -> Option<(&'static str, &'static [&'static str])> {
+    if automatic_quality_mode_supported(capability, preferred_rate_control, preferred_quality_keys)
+    {
+        return Some((preferred_rate_control, preferred_quality_keys));
+    }
+
+    const CANDIDATES: [(&str, &[&str]); 4] = [
+        ("CQP", &["cqp", "qp", "cq", "target_quality"]),
+        ("ICQ", &["icq_quality", "target_quality", "quality"]),
+        ("CRF", &["crf", "quality", "cq", "target_quality"]),
+        ("CQVBR", &["target_quality", "cq", "quality"]),
+    ];
+    CANDIDATES.iter().copied().find(|(rate_control, keys)| {
+        automatic_quality_mode_supported(capability, rate_control, keys)
+    })
+}
+
+fn automatic_fallback_bitrate_kbps(width: u32, height: u32, fps: Rational, codec: &str) -> u32 {
+    let bits_per_pixel = match codec.to_ascii_lowercase().as_str() {
+        "av1" => 0.12,
+        "hevc" | "h265" => 0.14,
+        _ => 0.20,
+    };
+    ((f64::from(width) * f64::from(height) * fps.as_f64() * bits_per_pixel / 1_000.0).round()
+        as u32)
+        .clamp(8_000, 50_000)
+}
+
+fn automatic_video_policy(
+    capability: &EncoderCapability,
+    width: u32,
+    height: u32,
+    fps: Rational,
+) -> AutomaticVideoPolicy {
+    let family = automatic_encoder_family(capability);
+    let codec = capability.codec.to_ascii_lowercase();
+    let obs_quality = obs_simple_recording_quality(width, height);
+    let high_resolution = u64::from(width) * u64::from(height) > 1_920 * 1_088;
+    let software_low_cpu = family == AutomaticEncoderFamily::X264
+        && f64::from(width) * f64::from(height) * fps.as_f64() > f64::from(1_280 * 720 * 30);
+    let (
+        family_label,
+        preferred_rate_control,
+        preferred_quality_keys,
+        preset,
+        profile,
+        use_bufsize,
+    ) = match family {
+        AutomaticEncoderFamily::Nvidia => (
+            "NVIDIA NVENC",
+            "CQP",
+            &["cqp", "cq", "qp", "target_quality"][..],
+            None,
+            Some(if codec == "h264" { "high" } else { "main" }),
+            false,
+        ),
+        AutomaticEncoderFamily::Amd => (
+            "AMD AMF",
+            "CQP",
+            &["cqp", "qp", "cq", "target_quality"][..],
+            Some(if codec == "av1" && high_resolution {
+                "balanced"
+            } else {
+                "quality"
+            }),
+            Some(if codec == "h264" { "high" } else { "main" }),
+            false,
+        ),
+        AutomaticEncoderFamily::Intel => (
+            "Intel Quick Sync",
+            if codec == "h264" { "ICQ" } else { "CQP" },
+            if codec == "h264" {
+                &["icq_quality", "target_quality", "quality"][..]
+            } else {
+                &["cqp", "qp", "cq", "target_quality"][..]
+            },
+            None,
+            Some("high"),
+            false,
+        ),
+        AutomaticEncoderFamily::Apple => (
+            "Apple VideoToolbox",
+            "CRF",
+            &["quality", "crf", "cq", "target_quality"][..],
+            None,
+            Some(if codec == "h264" { "high" } else { "main" }),
+            false,
+        ),
+        AutomaticEncoderFamily::X264 => (
+            "x264 software",
+            "CRF",
+            &["crf", "cq", "quality", "target_quality"][..],
+            Some(if software_low_cpu {
+                "ultrafast"
+            } else {
+                "veryfast"
+            }),
+            Some("high"),
+            true,
+        ),
+        AutomaticEncoderFamily::Other => (
+            "encoder-native",
+            "CQP",
+            &["cqp", "qp", "cq", "target_quality", "crf"][..],
+            None,
+            None,
+            false,
+        ),
+    };
+
+    let quality_mode =
+        select_automatic_quality_mode(capability, preferred_rate_control, preferred_quality_keys);
+    let quality_level = quality_mode.map(|(rate_control, _)| {
+        if family == AutomaticEncoderFamily::Apple && rate_control == "CRF" {
+            // OBS maps its medium-file recording tier to VideoToolbox quality 50.
+            50
+        } else if software_low_cpu {
+            // OBS's low-CPU x264 mode offsets ultrafast's quality loss by two
+            // CRF points while prioritizing encoder headroom.
+            obs_quality.saturating_sub(2)
+        } else {
+            obs_quality
+        }
+    });
+    let cbr_supported = encoder_setting_capability(capability, &["bitrate", "bitrate_kbps"])
+        .is_some()
+        && encoder_setting_capability(capability, &["rate_control", "rc"]).is_some_and(|setting| {
+            setting.kind != EncoderSettingKind::List
+                || (setting.options.is_empty() && setting.option_values.is_empty())
+                || setting
+                    .options
+                    .iter()
+                    .chain(setting.option_values.iter())
+                    .any(|option| native_rate_control_matches(option, "CBR"))
+        });
+
+    AutomaticVideoPolicy {
+        family_label,
+        rate_control: quality_mode
+            .map(|(rate_control, _)| rate_control)
+            .or(cbr_supported.then_some("CBR")),
+        quality_keys: quality_mode.map(|(_, keys)| keys).unwrap_or(&[]),
+        quality_level,
+        video_bitrate_kbps: (quality_mode.is_none() && cbr_supported).then(|| {
+            automatic_fallback_bitrate_kbps(width, height, fps, capability.codec.as_str())
+        }),
+        preset,
+        profile,
+        b_frames: (family == AutomaticEncoderFamily::Amd && high_resolution).then_some(0),
+        use_bufsize,
+    }
+}
+
+fn apply_automatic_video_encoder_settings(
+    settings: &mut libobs_wrapper::data::ObsData,
+    capability: Option<&EncoderCapability>,
+    width: u32,
+    height: u32,
+    fps: Rational,
+) -> Result<AppliedVideoSettings> {
+    let Some(capability) = capability else {
+        return Ok(AppliedVideoSettings {
+            rate_control: "Encoder default".into(),
+            quality_level: None,
+            video_bitrate_kbps: None,
+            max_bitrate_kbps: None,
+            diagnostics: vec![
+                "Automatic mode retained the encoder's native defaults because no property capabilities were reported."
+                    .into(),
+            ],
+        });
+    };
+    let policy = automatic_video_policy(capability, width, height, fps);
+    let mut diagnostics = Vec::new();
+
+    if let Some(rate_control) = policy.rate_control {
+        let _ = set_string_encoder_property(
+            settings,
+            Some(capability),
+            &["rate_control", "rc"],
+            rate_control,
+            "rate control",
+            &mut diagnostics,
+        )?;
+    }
+
+    let quality_level = if let Some(requested) = policy.quality_level {
+        if let Some(key) = encoder_property_key(Some(capability), policy.quality_keys) {
+            let value = bounded_encoder_integer(
+                Some(capability),
+                key,
+                i64::from(requested),
+                "quality",
+                &mut diagnostics,
+            );
+            settings.set_int(key, value)?;
+            Some(u32::try_from(value).unwrap_or(requested))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    let video_bitrate_kbps = if let Some(requested) = policy.video_bitrate_kbps {
+        if let Some(key) = encoder_property_key(Some(capability), &["bitrate", "bitrate_kbps"]) {
+            let value = bounded_encoder_integer(
+                Some(capability),
+                key,
+                i64::from(requested),
+                "video bitrate",
+                &mut diagnostics,
+            );
+            settings.set_int(key, value)?;
+            Some(u32::try_from(value).unwrap_or(requested))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    if let Some(profile) = policy.profile {
+        let _ = set_string_encoder_property(
+            settings,
+            Some(capability),
+            &["profile"],
+            profile,
+            "profile",
+            &mut diagnostics,
+        )?;
+    }
+    if let Some(preset) = policy.preset {
+        let _ = set_string_encoder_property(
+            settings,
+            Some(capability),
+            &["preset", "preset2"],
+            preset,
+            "preset",
+            &mut diagnostics,
+        )?;
+    }
+    if let Some(b_frames) = policy.b_frames {
+        let _ = set_int_encoder_property(
+            settings,
+            Some(capability),
+            &["bframes", "bf", "b_frames"],
+            i64::from(b_frames),
+            "B-frames",
+            &mut diagnostics,
+        )?;
+    }
+    if policy.use_bufsize {
+        let _ = set_bool_encoder_property(
+            settings,
+            Some(capability),
+            &["use_bufsize"],
+            true,
+            "rate-control buffer",
+            &mut diagnostics,
+        )?;
+    }
+
+    diagnostics.push(format!(
+        "Automatic mode preserved {}x{} and applied the OBS Simple recording policy for {} at {:.3} fps, retaining native defaults except for resolution-aware headroom settings.",
+        width,
+        height,
+        policy.family_label,
+        fps.as_f64(),
+    ));
+    Ok(AppliedVideoSettings {
+        rate_control: policy.rate_control.unwrap_or("Encoder default").into(),
+        quality_level,
+        video_bitrate_kbps,
+        max_bitrate_kbps: None,
+        diagnostics,
+    })
+}
+
 fn apply_video_encoder_settings(
     settings: &mut libobs_wrapper::data::ObsData,
     config: &RecorderConfig,
     capability: Option<&EncoderCapability>,
+    output_width: u32,
+    output_height: u32,
+    output_fps: Rational,
 ) -> Result<AppliedVideoSettings> {
+    if config.mode == RecorderMode::Automatic {
+        return apply_automatic_video_encoder_settings(
+            settings,
+            capability,
+            output_width,
+            output_height,
+            output_fps,
+        );
+    }
+
     let (rate_control, mut diagnostics) = resolve_rate_control(config, capability);
     let quality_supported =
         encoder_property_key(capability, &["target_quality", "cqp", "cq", "qp", "crf"]).is_some();
@@ -1605,8 +2075,8 @@ fn set_string_encoder_property(
     capability: Option<&EncoderCapability>,
     keys: &[&str],
     value: &str,
-    _label: &str,
-    _diagnostics: &mut Vec<String>,
+    label: &str,
+    diagnostics: &mut Vec<String>,
 ) -> Result<bool> {
     let Some(key) = encoder_property_key(capability, keys) else {
         return Ok(false);
@@ -1637,7 +2107,12 @@ fn set_string_encoder_property(
                     .iter()
                     .position(|option| option.eq_ignore_ascii_case(value))
             });
-        let option_index = option_index.unwrap_or(0);
+        let Some(option_index) = option_index else {
+            diagnostics.push(format!(
+                "The encoder does not advertise the requested {label} value '{value}'; its native default was retained."
+            ));
+            return Ok(false);
+        };
         let native_value = setting
             .option_values
             .get(option_index)
@@ -1966,6 +2441,30 @@ impl RecorderBackend for ObsBackend {
     fn status(&self) -> RecorderStatus {
         let mut status = self.status.clone();
         status.rss_bytes = current_rss_bytes();
+        if let Some(output) = &self.output {
+            let runtime = output.runtime().clone();
+            if let Ok((rendered, render_lagged, encoded, encoder_skipped)) = runtime
+                .run_with_obs_result(move || unsafe {
+                    let video = sys::obs_get_video();
+                    let rendered = u64::from(sys::obs_get_total_frames());
+                    let render_lagged = u64::from(sys::obs_get_lagged_frames());
+                    let (encoded, encoder_skipped) = if video.is_null() {
+                        (0, 0)
+                    } else {
+                        (
+                            u64::from(sys::video_output_get_total_frames(video)),
+                            u64::from(sys::video_output_get_skipped_frames(video)),
+                        )
+                    };
+                    (rendered, render_lagged, encoded, encoder_skipped)
+                })
+            {
+                status.rendered_frames = rendered;
+                status.render_lagged_frames = render_lagged;
+                status.encoded_frames = encoded;
+                status.encoder_skipped_frames = encoder_skipped;
+            }
+        }
         status
     }
 
@@ -3541,6 +4040,168 @@ mod tests {
         assert!(diagnostics
             .iter()
             .any(|diagnostic| diagnostic.contains("fell back")));
+    }
+
+    fn encoder_capability(id: &str, codec: &str) -> EncoderCapability {
+        EncoderCapability {
+            id: id.into(),
+            label: id.into(),
+            hardware: true,
+            codec: codec.into(),
+            family: codec.into(),
+            settings: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn automatic_capture_preserves_hardware_resolution_and_caps_frame_rate() {
+        assert_eq!(
+            automatic_frame_rate(Rational::new(60, 1), true),
+            Rational::new(60, 1)
+        );
+        assert_eq!(
+            automatic_frame_rate(Rational::new(144, 1), true),
+            Rational::new(60, 1)
+        );
+    }
+
+    #[test]
+    fn automatic_capture_caps_software_frame_rate() {
+        assert_eq!(
+            automatic_frame_rate(Rational::new(60, 1), false),
+            Rational::new(30, 1)
+        );
+    }
+
+    #[test]
+    fn obs_simple_quality_scales_only_for_smaller_canvases() {
+        assert_eq!(obs_simple_recording_quality(2_560, 1_440), 23);
+        assert_eq!(obs_simple_recording_quality(1_920, 1_080), 23);
+        assert_eq!(obs_simple_recording_quality(1_280, 720), 21);
+    }
+
+    #[test]
+    fn automatic_amd_av1_uses_high_resolution_headroom_settings() {
+        let capability = encoder_capability("av1_texture_amf", "av1");
+        let policy = automatic_video_policy(&capability, 2_560, 1_440, Rational::new(60, 1));
+
+        assert_eq!(policy.family_label, "AMD AMF");
+        assert_eq!(policy.rate_control, Some("CQP"));
+        assert_eq!(policy.quality_level, Some(23));
+        assert_eq!(policy.preset, Some("balanced"));
+        assert_eq!(policy.profile, Some("main"));
+        assert_eq!(policy.b_frames, Some(0));
+    }
+
+    #[test]
+    fn automatic_nvenc_uses_codec_appropriate_obs_profile() {
+        let av1 = encoder_capability("obs_nvenc_av1_tex", "av1");
+        let h264 = encoder_capability("obs_nvenc_h264_tex", "h264");
+        let av1_policy = automatic_video_policy(&av1, 1_920, 1_080, Rational::new(60, 1));
+        let h264_policy = automatic_video_policy(&h264, 1_920, 1_080, Rational::new(60, 1));
+
+        assert_eq!(av1_policy.rate_control, Some("CQP"));
+        assert_eq!(av1_policy.quality_level, Some(23));
+        assert_eq!(av1_policy.profile, Some("main"));
+        assert_eq!(av1_policy.preset, None);
+        assert_eq!(h264_policy.profile, Some("high"));
+    }
+
+    #[test]
+    fn automatic_intel_h264_prefers_obs_icq_mode() {
+        let capability = encoder_capability("obs_qsv11_v2", "h264");
+        let policy = automatic_video_policy(&capability, 1_920, 1_080, Rational::new(60, 1));
+
+        assert_eq!(policy.rate_control, Some("ICQ"));
+        assert_eq!(policy.quality_keys.first().copied(), Some("icq_quality"));
+        assert_eq!(policy.quality_level, Some(23));
+        assert_eq!(policy.profile, Some("high"));
+    }
+
+    #[test]
+    fn automatic_intel_falls_back_to_an_advertised_quality_mode() {
+        let mut capability = encoder_capability("obs_qsv11_v2", "h264");
+        capability.settings = vec![
+            EncoderSettingCapability {
+                key: "rate_control".into(),
+                kind: EncoderSettingKind::List,
+                options: vec!["CBR".into(), "CQP".into()],
+                option_values: vec!["CBR".into(), "CQP".into()],
+                min: None,
+                max: None,
+                step: None,
+                description: None,
+            },
+            EncoderSettingCapability {
+                key: "cqp".into(),
+                kind: EncoderSettingKind::Integer,
+                options: Vec::new(),
+                option_values: Vec::new(),
+                min: Some(1.0),
+                max: Some(51.0),
+                step: Some(1.0),
+                description: None,
+            },
+        ];
+        let policy = automatic_video_policy(&capability, 1_920, 1_080, Rational::new(60, 1));
+
+        assert_eq!(policy.rate_control, Some("CQP"));
+        assert_eq!(policy.quality_keys.first().copied(), Some("cqp"));
+        assert_eq!(policy.quality_level, Some(23));
+    }
+
+    #[test]
+    fn automatic_x264_uses_obs_low_cpu_settings_for_large_workloads() {
+        let mut capability = encoder_capability("obs_x264", "h264");
+        capability.hardware = false;
+        let policy = automatic_video_policy(&capability, 2_560, 1_440, Rational::new(30, 1));
+
+        assert_eq!(policy.rate_control, Some("CRF"));
+        assert_eq!(policy.quality_level, Some(21));
+        assert_eq!(policy.preset, Some("ultrafast"));
+        assert!(policy.use_bufsize);
+    }
+
+    #[test]
+    fn automatic_apple_uses_videotoolbox_quality_scale() {
+        let capability = encoder_capability("com.apple.videotoolbox.videoencoder.ave.hevc", "hevc");
+        let policy = automatic_video_policy(&capability, 1_920, 1_080, Rational::new(60, 1));
+
+        assert_eq!(policy.rate_control, Some("CRF"));
+        assert_eq!(policy.quality_level, Some(50));
+        assert_eq!(policy.profile, Some("main"));
+    }
+
+    #[test]
+    fn automatic_unknown_encoder_has_a_bounded_cbr_last_resort() {
+        let mut capability = encoder_capability("vendor_encoder", "h264");
+        capability.settings = vec![
+            EncoderSettingCapability {
+                key: "rate_control".into(),
+                kind: EncoderSettingKind::List,
+                options: vec!["Constant Bitrate".into()],
+                option_values: vec!["CBR".into()],
+                min: None,
+                max: None,
+                step: None,
+                description: None,
+            },
+            EncoderSettingCapability {
+                key: "bitrate".into(),
+                kind: EncoderSettingKind::Integer,
+                options: Vec::new(),
+                option_values: Vec::new(),
+                min: Some(1_000.0),
+                max: Some(100_000.0),
+                step: Some(50.0),
+                description: None,
+            },
+        ];
+        let policy = automatic_video_policy(&capability, 1_920, 1_080, Rational::new(60, 1));
+
+        assert_eq!(policy.rate_control, Some("CBR"));
+        assert_eq!(policy.quality_level, None);
+        assert_eq!(policy.video_bitrate_kbps, Some(24_883));
     }
 
     #[test]

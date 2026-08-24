@@ -1011,6 +1011,18 @@ pub struct RecorderStatus {
     pub hotkey_error: Option<String>,
     #[serde(default)]
     pub effective_settings: Option<EffectiveRecorderSettings>,
+    /// Frames libobs attempted to render since the active video context started.
+    #[serde(default)]
+    pub rendered_frames: u64,
+    /// Frames libobs could not render on time because the graphics pipeline was busy.
+    #[serde(default)]
+    pub render_lagged_frames: u64,
+    /// Frames submitted to the active video encoder.
+    #[serde(default)]
+    pub encoded_frames: u64,
+    /// Frames skipped because the active video encoder could not keep up.
+    #[serde(default)]
+    pub encoder_skipped_frames: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1048,6 +1060,10 @@ impl Default for RecorderStatus {
             hotkey_registered: false,
             hotkey_error: None,
             effective_settings: None,
+            rendered_frames: 0,
+            render_lagged_frames: 0,
+            encoded_frames: 0,
+            encoder_skipped_frames: 0,
         }
     }
 }
@@ -1798,12 +1814,32 @@ mod tests {
                 container_format: "mkv".into(),
                 diagnostics: vec!["look-ahead unavailable".into()],
             }),
+            rendered_frames: 12_000,
+            render_lagged_frames: 3,
+            encoded_frames: 11_997,
+            encoder_skipped_frames: 1,
             ..RecorderStatus::default()
         }));
         let mut bytes = Vec::new();
         write_frame(&mut bytes, &message).unwrap();
         let decoded: ServiceMessage = read_frame(&mut Cursor::new(bytes)).unwrap();
         assert_eq!(decoded, message);
+    }
+
+    #[test]
+    fn legacy_status_defaults_frame_health_counters() {
+        let mut value = serde_json::to_value(RecorderStatus::default()).unwrap();
+        let object = value.as_object_mut().unwrap();
+        object.remove("renderedFrames");
+        object.remove("renderLaggedFrames");
+        object.remove("encodedFrames");
+        object.remove("encoderSkippedFrames");
+
+        let decoded: RecorderStatus = serde_json::from_value(value).unwrap();
+        assert_eq!(decoded.rendered_frames, 0);
+        assert_eq!(decoded.render_lagged_frames, 0);
+        assert_eq!(decoded.encoded_frames, 0);
+        assert_eq!(decoded.encoder_skipped_frames, 0);
     }
 
     #[test]
